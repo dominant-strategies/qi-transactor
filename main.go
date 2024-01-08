@@ -59,6 +59,7 @@ func main() {
 	tx := makeUTXOTransaction(fromAddress, toAddress, uncompressedPubkey)
 	txHash := tx.Hash().Bytes()
 
+	fmt.Println("TX HASH SIGNED: ", common.Bytes2Hex(txHash))
 	sig, err := schnorr.Sign(btcecKey, txHash[:])
 	if err != nil {
 		log.Fatalf("Failed to sign transaction: %v", err)
@@ -67,12 +68,20 @@ func main() {
 	utxo := &types.UtxoTx{
 		TxIn:      tx.TxIn(),
 		TxOut:     tx.TxOut(),
-		Signature: sig,
+		Signature: sig.Serialize(),
 	}
 
-	fmt.Println("Signature: ", sig.Serialize())
+	fmt.Println("Signature: ", common.Bytes2Hex(sig.Serialize()))
 
 	signedTx := types.NewTx(utxo)
+
+	fmt.Println("script: sig.Verify(txHash[:], finalKey)", common.Bytes2Hex(txHash[:]), common.Bytes2Hex(uncompressedPubkey))
+
+	if !sig.Verify(txHash[:], btcecKey.PubKey()) {
+		log.Fatal("Failed to verify signature")
+	}
+
+	fmt.Println("Signature Verified")
 
 	// Send the transaction
 	err = client.SendTransaction(context.Background(), signedTx)
@@ -84,7 +93,7 @@ func main() {
 }
 
 func makeUTXOTransaction(from common.Address, to common.Address, pubKey []byte) *types.Transaction {
-	outpointHash := common.HexToHash("25d68b77305d914253e0c8c9e43a60ab802e13aa13aabbb8090649c6f0c00718")
+	outpointHash := common.HexToHash("0330aad884645a1d810b53cdd4d6ae0363ea91839613f775d5c46f46a8dfd8d0")
 	outpointIndex := uint32(0)
 
 	// key = hash(blockHash, index)
