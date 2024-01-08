@@ -41,25 +41,10 @@ func main() {
 	fromAddress := crypto.PubkeyToAddress(privateKey.PublicKey)
 	toAddress := common.HexToAddress("0x1aCC3AF2647375A76bFB813B9b22Ec08e179110A")
 
-	fmt.Println("Compressed Public Key: ", hex.EncodeToString(uncompressedPubkey))
-	fmt.Println("From Address: ", fromAddress.Hex())
-	fmt.Println("To Address: ", toAddress.Hex())
-
-	recreatePubKey, err := crypto.UnmarshalPubkey(uncompressedPubkey)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	recreateAddr := crypto.PubkeyToAddress(*recreatePubKey)
-
-	fmt.Println("Recreated Address: ", recreateAddr.Hex())
-
 	// Create the transaction
 	tx := makeUTXOTransaction(fromAddress, toAddress, uncompressedPubkey)
 	txHash := tx.Hash().Bytes()
 
-	fmt.Println("TX HASH SIGNED: ", common.Bytes2Hex(txHash))
 	sig, err := schnorr.Sign(btcecKey, txHash[:])
 	if err != nil {
 		log.Fatalf("Failed to sign transaction: %v", err)
@@ -71,29 +56,35 @@ func main() {
 		Signature: sig.Serialize(),
 	}
 
-	fmt.Println("Signature: ", common.Bytes2Hex(sig.Serialize()))
-
 	signedTx := types.NewTx(utxo)
-
-	fmt.Println("script: sig.Verify(txHash[:], finalKey)", common.Bytes2Hex(txHash[:]), common.Bytes2Hex(uncompressedPubkey))
 
 	if !sig.Verify(txHash[:], btcecKey.PubKey()) {
 		log.Fatal("Failed to verify signature")
 	}
 
-	fmt.Println("Signature Verified")
+	rawUtxo := &types.UtxoTx{
+		TxIn:  tx.TxIn(),
+		TxOut: tx.TxOut(),
+	}
+
+	rawTx := types.NewTx(rawUtxo)
+
+	txHash = rawTx.Hash().Bytes()
+
+	fmt.Println("Signed Raw Transaction")
+	fmt.Println("Signature:", common.Bytes2Hex(sig.Serialize()))
+	fmt.Println("TX Hash", common.Bytes2Hex(txHash[:]))
+	fmt.Println("Pubkey", common.Bytes2Hex(uncompressedPubkey))
 
 	// Send the transaction
 	err = client.SendTransaction(context.Background(), signedTx)
 	if err != nil {
 		log.Fatalf("Failed to send transaction: %v", err)
 	}
-
-	fmt.Printf("Transaction sent! Tx Hash: %s\n", signedTx.Hash().Hex())
 }
 
 func makeUTXOTransaction(from common.Address, to common.Address, pubKey []byte) *types.Transaction {
-	outpointHash := common.HexToHash("0330aad884645a1d810b53cdd4d6ae0363ea91839613f775d5c46f46a8dfd8d0")
+	outpointHash := common.HexToHash("471101dc4a407999500a718c4f9659abc8b01bbca5220a19a7549b53ca11ff6a")
 	outpointIndex := uint32(0)
 
 	// key = hash(blockHash, index)
