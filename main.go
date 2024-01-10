@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math/big"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
@@ -43,7 +44,12 @@ func main() {
 
 	// Create the transaction
 	tx := makeUTXOTransaction(fromAddress, toAddress, uncompressedPubkey)
-	txHash := tx.Hash().Bytes()
+
+	chainId := big.NewInt(1337)
+
+	signer := types.NewSigner(chainId)
+
+	txHash := signer.Hash(tx)
 
 	sig, err := schnorr.Sign(btcecKey, txHash[:])
 	if err != nil {
@@ -51,9 +57,10 @@ func main() {
 	}
 
 	utxo := &types.UtxoTx{
+		ChainID:   big.NewInt(1337),
 		TxIn:      tx.TxIn(),
 		TxOut:     tx.TxOut(),
-		Signature: sig.Serialize(),
+		Signature: sig,
 	}
 
 	signedTx := types.NewTx(utxo)
@@ -63,13 +70,14 @@ func main() {
 	}
 
 	rawUtxo := &types.UtxoTx{
-		TxIn:  tx.TxIn(),
-		TxOut: tx.TxOut(),
+		ChainID: chainId,
+		TxIn:    tx.TxIn(),
+		TxOut:   tx.TxOut(),
 	}
 
 	rawTx := types.NewTx(rawUtxo)
 
-	txHash = rawTx.Hash().Bytes()
+	txHash = signer.Hash(rawTx)
 
 	fmt.Println("Signed Raw Transaction")
 	fmt.Println("Signature:", common.Bytes2Hex(sig.Serialize()))
@@ -84,7 +92,7 @@ func main() {
 }
 
 func makeUTXOTransaction(from common.Address, to common.Address, pubKey []byte) *types.Transaction {
-	outpointHash := common.HexToHash("471101dc4a407999500a718c4f9659abc8b01bbca5220a19a7549b53ca11ff6a")
+	outpointHash := common.HexToHash("2b5fcb119d94356879a54706e92aaf709a3ff93f6b5b23501ba8c2bbeec729a4")
 	outpointIndex := uint32(0)
 
 	// key = hash(blockHash, index)
@@ -97,8 +105,7 @@ func makeUTXOTransaction(from common.Address, to common.Address, pubKey []byte) 
 	}
 
 	newOut := types.TxOut{
-		Value: 10000000,
-		// Value:    blockchain.CalcBlockSubsidy(nextBlockHeight, params),
+		Value:   10000000,
 		Address: to.Bytes(),
 	}
 
