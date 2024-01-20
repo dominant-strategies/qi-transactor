@@ -15,7 +15,7 @@ import (
 	"github.com/dominant-strategies/go-quai/quaiclient/ethclient"
 )
 
-const url = "http://localhost:8610"
+const url = "http://localhost:9003"
 const privKey = "345debf66bc68724062b236d3b0a6eb30f051e725ebb770f1dc367f2c569f003"
 
 func main() {
@@ -36,18 +36,21 @@ func main() {
 		fmt.Println(err)
 	}
 
+	location := common.Location{0, 0}
+
 	// btcec key for schnorr use
 	btcecKey, _ := btcec.PrivKeyFromBytes(b)
 	uncompressedPubkey := btcecKey.PubKey().SerializeUncompressed()
-	fromAddress := crypto.PubkeyToAddress(privateKey.PublicKey)
-	toAddress := common.HexToAddress("0x1aCC3AF2647375A76bFB813B9b22Ec08e179110A")
+	fromAddress := crypto.PubkeyToAddress(privateKey.PublicKey, location)
+	fmt.Println("From Address: ", fromAddress.Hex())
+
+	toAddress := common.HexToAddress("0x1aCC3AF2647375A76bFB813B9b22Ec08e179110A", location)
 
 	// Create the transaction
 	tx := makeUTXOTransaction(fromAddress, toAddress, uncompressedPubkey)
 
 	chainId := big.NewInt(1337)
-
-	signer := types.NewSigner(chainId)
+	signer := types.NewSigner(chainId, location)
 
 	txHash := signer.Hash(tx)
 
@@ -92,7 +95,7 @@ func main() {
 }
 
 func makeUTXOTransaction(from common.Address, to common.Address, pubKey []byte) *types.Transaction {
-	outpointHash := common.HexToHash("2b5fcb119d94356879a54706e92aaf709a3ff93f6b5b23501ba8c2bbeec729a4")
+	outpointHash := common.HexToHash("0x0000055075e23c3a45f3e5df2bbd2fbc41f96ee348d02e3b44cff601d6b1060a")
 	outpointIndex := uint32(0)
 
 	// key = hash(blockHash, index)
@@ -105,8 +108,8 @@ func makeUTXOTransaction(from common.Address, to common.Address, pubKey []byte) 
 	}
 
 	newOut := types.TxOut{
-		Value:   10000000,
-		Address: to.Bytes(),
+		Denomination: uint8(1),
+		Address:      to.Bytes(),
 	}
 
 	utxo := &types.UtxoTx{
