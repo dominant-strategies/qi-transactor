@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
@@ -15,12 +18,16 @@ import (
 	"github.com/dominant-strategies/go-quai/quaiclient/ethclient"
 )
 
-const url = "http://localhost:9003"
+const httpUrl = "http://localhost:9003"
+const wsUrl = "ws://localhost:8003"
 const privKey = "345debf66bc68724062b236d3b0a6eb30f051e725ebb770f1dc367f2c569f003"
 
 func main() {
+
+	go listenForNewBlocks()
+
 	// Connect to the Ethereum client
-	client, err := ethclient.Dial(url)
+	client, err := ethclient.Dial(httpUrl)
 	if err != nil {
 		log.Fatalf("Failed to connect to the Ethereum client: %v", err)
 	}
@@ -92,10 +99,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to send transaction: %v", err)
 	}
+
+	// Wait for an interrupt signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	fmt.Println("Shutting down...")
+	// Perform any cleanup if necessary
 }
 
 func makeUTXOTransaction(from common.Address, to common.Address, pubKey []byte) *types.Transaction {
-	outpointHash := common.HexToHash("0x0000055075e23c3a45f3e5df2bbd2fbc41f96ee348d02e3b44cff601d6b1060a")
+	outpointHash := common.HexToHash("0x00000a9ca45a7052382e3a90b47989ba6f6e5e9f3e2a85c31896469d6808315a")
 	outpointIndex := uint32(0)
 
 	// key = hash(blockHash, index)
@@ -120,4 +135,33 @@ func makeUTXOTransaction(from common.Address, to common.Address, pubKey []byte) 
 	tx := types.NewTx(utxo)
 
 	return tx
+}
+
+func listenForNewBlocks() {
+	// Connect to the Ethereum client via WebSocket
+	wsClient, err := ethclient.Dial(wsUrl)
+	if err != nil {
+		log.Fatalf("Failed to connect to the Ethereum WebSocket client: %v", err)
+	}
+	defer wsClient.Close()
+
+	// Subscribe to new block headers
+	headers := make(chan *types.Header)
+	sub, err := wsClient.SubscribeNewHead(context.Background(), headers)
+	if err != nil {
+		log.Fatalf("Failed to subscribe to new headers: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Listen for new blocks
+	fmt.Println("Listening for new blocks...")
+	for {
+		select {
+		case err := <-sub.Err():
+			log.Fatal(err)
+		case header := <-headers:
+			fmt.Println("New block:", header.NumberArray(), "Hash:", header.Hash().Hex())
+			// Add your logic here to handle new blocks
+		}
+	}
 }
