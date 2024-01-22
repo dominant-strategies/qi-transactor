@@ -8,10 +8,12 @@ import (
 	"math/big"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/dominant-strategies/go-quai/common"
 	"github.com/dominant-strategies/go-quai/core/types"
 	"github.com/dominant-strategies/go-quai/crypto"
@@ -22,83 +24,17 @@ const httpUrl = "http://localhost:9003"
 const wsUrl = "ws://localhost:8003"
 const privKey = "345debf66bc68724062b236d3b0a6eb30f051e725ebb770f1dc367f2c569f003"
 
+var location = common.Location{0, 0}
+
+var (
+	headerHashes []common.Hash
+	hashMutex    sync.Mutex
+)
+
 func main() {
 
 	go listenForNewBlocks()
-
-	// Connect to the Ethereum client
-	client, err := ethclient.Dial(httpUrl)
-	if err != nil {
-		log.Fatalf("Failed to connect to the Ethereum client: %v", err)
-	}
-
-	// Load your private key
-	privateKey, err := crypto.HexToECDSA(privKey)
-	if err != nil {
-		log.Fatalf("Invalid private key: %v", err)
-	}
-
-	b, err := hex.DecodeString(privKey)
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	location := common.Location{0, 0}
-
-	// btcec key for schnorr use
-	btcecKey, _ := btcec.PrivKeyFromBytes(b)
-	uncompressedPubkey := btcecKey.PubKey().SerializeUncompressed()
-	fromAddress := crypto.PubkeyToAddress(privateKey.PublicKey, location)
-	fmt.Println("From Address: ", fromAddress.Hex())
-
-	toAddress := common.HexToAddress("0x1aCC3AF2647375A76bFB813B9b22Ec08e179110A", location)
-
-	// Create the transaction
-	tx := makeUTXOTransaction(fromAddress, toAddress, uncompressedPubkey)
-
-	chainId := big.NewInt(1337)
-	signer := types.NewSigner(chainId, location)
-
-	txHash := signer.Hash(tx)
-
-	sig, err := schnorr.Sign(btcecKey, txHash[:])
-	if err != nil {
-		log.Fatalf("Failed to sign transaction: %v", err)
-	}
-
-	utxo := &types.UtxoTx{
-		ChainID:   big.NewInt(1337),
-		TxIn:      tx.TxIn(),
-		TxOut:     tx.TxOut(),
-		Signature: sig,
-	}
-
-	signedTx := types.NewTx(utxo)
-
-	if !sig.Verify(txHash[:], btcecKey.PubKey()) {
-		log.Fatal("Failed to verify signature")
-	}
-
-	rawUtxo := &types.UtxoTx{
-		ChainID: chainId,
-		TxIn:    tx.TxIn(),
-		TxOut:   tx.TxOut(),
-	}
-
-	rawTx := types.NewTx(rawUtxo)
-
-	txHash = signer.Hash(rawTx)
-
-	fmt.Println("Signed Raw Transaction")
-	fmt.Println("Signature:", common.Bytes2Hex(sig.Serialize()))
-	fmt.Println("TX Hash", common.Bytes2Hex(txHash[:]))
-	fmt.Println("Pubkey", common.Bytes2Hex(uncompressedPubkey))
-
-	// Send the transaction
-	err = client.SendTransaction(context.Background(), signedTx)
-	if err != nil {
-		log.Fatalf("Failed to send transaction: %v", err)
-	}
+	go createTransactions()
 
 	// Wait for an interrupt signal
 	quit := make(chan os.Signal, 1)
@@ -109,10 +45,7 @@ func main() {
 	// Perform any cleanup if necessary
 }
 
-func makeUTXOTransaction(from common.Address, to common.Address, pubKey []byte) *types.Transaction {
-	outpointHash := common.HexToHash("0x00000a9ca45a7052382e3a90b47989ba6f6e5e9f3e2a85c31896469d6808315a")
-	outpointIndex := uint32(0)
-
+func makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from common.Address, to common.Address, btcecKey *secp256k1.PrivateKey, pubKey []byte) *types.Transaction {
 	// key = hash(blockHash, index)
 	// Find hash / index for originUtxo / imagine this is block hash
 	prevOut := *types.NewOutPoint(&outpointHash, outpointIndex)
@@ -133,6 +66,44 @@ func makeUTXOTransaction(from common.Address, to common.Address, pubKey []byte) 
 	}
 
 	tx := types.NewTx(utxo)
+
+	chainId := big.NewInt(1337)
+	signer := types.NewSigner(chainId, location)
+
+	txHash := signer.Hash(tx)
+
+	sig, err := schnorr.Sign(btcecKey, txHash[:])
+	if err != nil {
+		log.Fatalf("Failed to sign transaction: %v", err)
+	}
+
+	signedUtxo := &types.UtxoTx{
+		ChainID:   big.NewInt(1337),
+		TxIn:      tx.TxIn(),
+		TxOut:     tx.TxOut(),
+		Signature: sig,
+	}
+
+	signedTx := types.NewTx(signedUtxo)
+
+	fmt.Println("Signed Raw Transaction")
+	fmt.Println("Signature:", common.Bytes2Hex(sig.Serialize()))
+	fmt.Println("TX Hash", common.Bytes2Hex(txHash[:]))
+	fmt.Println("Pubkey", common.Bytes2Hex(pubKey))
+
+	// Connect to the Ethereum client
+	client, err := ethclient.Dial(httpUrl)
+	if err != nil {
+		log.Fatalf("Failed to connect to the Ethereum client: %v", err)
+	}
+
+	// Send the transaction
+	err = client.SendTransaction(context.Background(), signedTx)
+	if err != nil {
+		log.Fatalf("Failed to send transaction: %v", err)
+	}
+
+	fmt.Println()
 
 	return tx
 }
@@ -161,7 +132,45 @@ func listenForNewBlocks() {
 			log.Fatal(err)
 		case header := <-headers:
 			fmt.Println("New block:", header.NumberArray(), "Hash:", header.Hash().Hex())
-			// Add your logic here to handle new blocks
+			hashMutex.Lock()
+			headerHashes = append(headerHashes, header.Hash())
+			hashMutex.Unlock()
+		}
+	}
+}
+
+func createTransactions() {
+	// Load your private key
+	privateKey, err := crypto.HexToECDSA(privKey)
+	if err != nil {
+		log.Fatalf("Invalid private key: %v", err)
+	}
+
+	b, err := hex.DecodeString(privKey)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	// btcec key for schnorr use
+	btcecKey, _ := btcec.PrivKeyFromBytes(b)
+	uncompressedPubkey := btcecKey.PubKey().SerializeUncompressed()
+	fromAddress := crypto.PubkeyToAddress(privateKey.PublicKey, location)
+	toAddress := common.HexToAddress("0x1aCC3AF2647375A76bFB813B9b22Ec08e179110A", location)
+
+	for {
+		hashMutex.Lock()
+		if len(headerHashes) > 0 {
+			// Use the first hash and remove it from the slice
+			hash := headerHashes[0]
+			headerHashes = headerHashes[1:]
+			hashMutex.Unlock()
+
+			// Now use this hash to create a transaction
+			makeUTXOTransaction(hash, 0, fromAddress, toAddress, btcecKey, uncompressedPubkey)
+		} else {
+			hashMutex.Unlock()
+			// Sleep for a while before checking again
+			// time.Sleep(1 * time.Second)
 		}
 	}
 }
