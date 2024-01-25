@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
@@ -29,6 +30,9 @@ var location = common.Location{0, 0}
 var (
 	headerHashes []common.Hash
 	hashMutex    sync.Mutex
+
+	txHashes []common.Hash
+	txMutex  sync.Mutex
 )
 
 func main() {
@@ -61,8 +65,9 @@ func makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from co
 	}
 
 	utxo := &types.UtxoTx{
-		TxIn:  []types.TxIn{in},
-		TxOut: []types.TxOut{newOut},
+		ChainID: big.NewInt(1337),
+		TxIn:    []types.TxIn{in},
+		TxOut:   []types.TxOut{newOut},
 	}
 
 	tx := types.NewTx(utxo)
@@ -86,10 +91,12 @@ func makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from co
 
 	signedTx := types.NewTx(signedUtxo)
 
-	fmt.Println("Signed Raw Transaction")
-	fmt.Println("Signature:", common.Bytes2Hex(sig.Serialize()))
-	fmt.Println("TX Hash", common.Bytes2Hex(txHash[:]))
-	fmt.Println("Pubkey", common.Bytes2Hex(pubKey))
+	txHash2 := signer.Hash(signedTx)
+
+	fmt.Println("Sent Transaction Hash    :", "0x"+common.Bytes2Hex(txHash2[:]))
+
+	// fmt.Println("Signature:", common.Bytes2Hex(sig.Serialize()))
+	// fmt.Println("Pubkey", common.Bytes2Hex(pubKey))
 
 	// Connect to the Ethereum client
 	client, err := ethclient.Dial(httpUrl)
@@ -102,8 +109,6 @@ func makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from co
 	if err != nil {
 		log.Fatalf("Failed to send transaction: %v", err)
 	}
-
-	fmt.Println()
 
 	return tx
 }
@@ -131,12 +136,43 @@ func listenForNewBlocks() {
 		case err := <-sub.Err():
 			log.Fatal(err)
 		case header := <-headers:
-			fmt.Println("New block:", header.NumberArray(), "Hash:", header.Hash().Hex())
 			hashMutex.Lock()
 			headerHashes = append(headerHashes, header.Hash())
+
+			time.Sleep(1 * time.Second)
+			getBlockAndTransactions(header.Hash())
 			hashMutex.Unlock()
 		}
 	}
+}
+
+func getBlockAndTransactions(hash common.Hash) {
+	// Connect to the Ethereum client
+	client, err := ethclient.Dial(httpUrl)
+	if err != nil {
+		log.Fatalf("Failed to connect to the Ethereum client: %v", err)
+	}
+
+	defer client.Close()
+
+	// Retrieve the block by its hash
+	block, err := client.BlockByHash(context.Background(), hash)
+	if err != nil {
+		fmt.Printf("Failed to retrieve the block: %s %s\n", hash, err)
+		return
+	}
+
+	// Display block information
+	fmt.Printf("number: %d txs: %d  hash: %s\n", block.Header().NumberArray(), len(block.Transactions()), block.Hash().Hex())
+
+	// Iterate over and display transactions in the block
+	txMutex.Lock()
+	for _, tx := range block.Transactions() {
+		fmt.Printf("Received Transaction Hash: %s\n", tx.Hash().Hex())
+		txHashes = append(txHashes, tx.Hash())
+	}
+	fmt.Println("len of txHashes:", len(txHashes))
+	txMutex.Unlock()
 }
 
 func createTransactions() {
@@ -172,5 +208,18 @@ func createTransactions() {
 			// Sleep for a while before checking again
 			// time.Sleep(1 * time.Second)
 		}
+
+		txMutex.Lock()
+		if len(txHashes) > 0 {
+			for _, hash := range txHashes {
+				fmt.Println("TX Hash", hash.Hex())
+				makeUTXOTransaction(hash, 0, fromAddress, toAddress, btcecKey, uncompressedPubkey)
+				txHashes = txHashes[1:]
+			}
+		} else {
+			// Sleep for a while before checking again
+			time.Sleep(1 * time.Second)
+		}
+		txMutex.Unlock()
 	}
 }
