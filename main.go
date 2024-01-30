@@ -27,13 +27,20 @@ const privKey = "345debf66bc68724062b236d3b0a6eb30f051e725ebb770f1dc367f2c569f00
 
 var location = common.Location{0, 0}
 
+type OutpointAndTxOut struct {
+	outpoint *types.OutPoint
+	txOut    *types.TxOut
+}
+
 var (
 	headerHashes []common.Hash
 	hashMutex    sync.Mutex
 
-	txHashes []common.Hash
-	txMutex  sync.Mutex
+	spendableOutpoints []OutpointAndTxOut
+	txMutex            sync.Mutex
 )
+
+var txTotal = 0
 
 func main() {
 
@@ -167,9 +174,15 @@ func getBlockAndTransactions(hash common.Hash) {
 	txMutex.Lock()
 	for _, tx := range block.Transactions() {
 		fmt.Printf("Received Transaction Hash: %s\n", tx.Hash().Hex())
-		txHashes = append(txHashes, tx.Hash())
+		for i := range tx.TxOut() {
+			outpoint := &types.OutPoint{Hash: tx.Hash(), Index: uint32(i)}
+			OutpointAndAddress := OutpointAndTxOut{outpoint, &tx.TxOut()[i]}
+			spendableOutpoints = append(spendableOutpoints, OutpointAndAddress)
+		}
+		txTotal += 1
 	}
-	fmt.Println("len of txHashes:", len(txHashes))
+	fmt.Println("num of spendable outs:", len(spendableOutpoints))
+	fmt.Println("sum of txs:           ", txTotal)
 	txMutex.Unlock()
 }
 
@@ -208,10 +221,15 @@ func createTransactions() {
 		}
 
 		txMutex.Lock()
-		if len(txHashes) > 0 {
-			for _, hash := range txHashes {
-				makeUTXOTransaction(hash, 0, fromAddress, toAddress, btcecKey, uncompressedPubkey)
-				txHashes = txHashes[1:]
+		if len(spendableOutpoints) > 0 {
+			for _, item := range spendableOutpoints {
+				// fmt.Println("item.outpoint.Hash:", item.outpoint.Hash.Hex())
+				// fmt.Println("item.outpoint.Index:", item.outpoint.Index)
+				// fmt.Println("item.txOut.Address:", common.Bytes2Hex(item.txOut.Address))
+				// fmt.Println("item.txOut.Denomination:", item.txOut.Denomination)
+				makeUTXOTransaction(item.outpoint.Hash, item.outpoint.Index, fromAddress, toAddress, btcecKey, uncompressedPubkey)
+
+				spendableOutpoints = spendableOutpoints[1:]
 			}
 		} else {
 			// Sleep for a while before checking again
