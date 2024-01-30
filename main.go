@@ -32,15 +32,24 @@ type OutpointAndTxOut struct {
 	txOut    *types.TxOut
 }
 
+const maxBlocks = 100
+
 var (
 	headerHashes []common.Hash
 	hashMutex    sync.Mutex
 
 	spendableOutpoints []OutpointAndTxOut
 	txMutex            sync.Mutex
+	blockInfos         []blockInfo // Slice to store information about the last 100 blocks
 )
 
+type blockInfo struct {
+	Time             time.Time
+	TransactionCount int
+}
+
 var txTotal = 0
+var outpointTotal = 0
 
 func main() {
 
@@ -68,7 +77,7 @@ func makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from co
 
 	newOut := types.TxOut{
 		Denomination: uint8(1),
-		Address:      to.Bytes(),
+		Address:      from.Bytes(),
 	}
 
 	utxo := &types.UtxoTx{
@@ -98,7 +107,7 @@ func makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from co
 
 	signedTx := types.NewTx(signedUtxo)
 
-	fmt.Println("Sent Transaction Hash    :", signedTx.Hash().Hex())
+	// fmt.Println("Sent Transaction Hash    :", signedTx.Hash().Hex())
 
 	// fmt.Println("Signature:", common.Bytes2Hex(sig.Serialize()))
 	// fmt.Println("Pubkey", common.Bytes2Hex(pubKey))
@@ -170,30 +179,54 @@ func getBlockAndTransactions(hash common.Hash) {
 	// Display block information
 	fmt.Printf("number: %d txs: %d  hash: %s\n", block.Header().NumberArray(), len(block.Transactions()), block.Hash().Hex())
 
+	// Calculate TPS based on block time
+	currentBlockInfo := blockInfo{
+		Time:             time.Unix(int64(block.Time()), 0),
+		TransactionCount: len(block.Transactions()),
+	}
+	blockInfos = append(blockInfos, currentBlockInfo)
+	if len(blockInfos) > maxBlocks {
+		blockInfos = blockInfos[1:] // Keep only the last 100 blocks
+	}
+
+	// Calculate weighted TPS
+	if len(blockInfos) > 1 {
+		var totalTransactions int
+		var totalTime float64
+		for i := 1; i < len(blockInfos); i++ {
+			totalTransactions += blockInfos[i].TransactionCount
+			totalTime += blockInfos[i].Time.Sub(blockInfos[i-1].Time).Seconds()
+		}
+		if totalTime > 0 {
+			weightedTPS := float64(totalTransactions) / totalTime
+			fmt.Printf("Weighted TPS (last %d blocks): %f\n", len(blockInfos), weightedTPS)
+		}
+	}
+
 	// Iterate over and display transactions in the block
 	txMutex.Lock()
-
 	coinbaseTx := block.Transactions()[0]
 	coinbaseOuts := coinbaseTx.TxOut()
 	for i := range coinbaseOuts {
 		outpoint := &types.OutPoint{Hash: block.Hash(), Index: uint32(i)}
 		OutpointAndAddress := OutpointAndTxOut{outpoint, &coinbaseTx.TxOut()[i]}
 		spendableOutpoints = append(spendableOutpoints, OutpointAndAddress)
-		txTotal += 1
+		outpointTotal += 1
 	}
+	txTotal += 1
 
 	for _, tx := range block.Transactions()[1:] {
-		fmt.Printf("Received Transaction Hash: %s\n", tx.Hash().Hex())
+		// fmt.Printf("Received Transaction Hash: %s\n", tx.Hash().Hex())
 		for i := range tx.TxOut() {
 			outpoint := &types.OutPoint{Hash: tx.Hash(), Index: uint32(i)}
 			OutpointAndAddress := OutpointAndTxOut{outpoint, &tx.TxOut()[i]}
 			spendableOutpoints = append(spendableOutpoints, OutpointAndAddress)
+			outpointTotal += 1
 		}
 		txTotal += 1
 	}
 
-	fmt.Println("num of spendable outs:", len(spendableOutpoints))
-	fmt.Println("sum of txs:           ", txTotal)
+	fmt.Println("tx sum:", txTotal, "outpoint sum:", outpointTotal, "current spendable outs", len(spendableOutpoints))
 	txMutex.Unlock()
 }
 
