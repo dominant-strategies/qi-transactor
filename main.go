@@ -172,7 +172,17 @@ func getBlockAndTransactions(hash common.Hash) {
 
 	// Iterate over and display transactions in the block
 	txMutex.Lock()
-	for _, tx := range block.Transactions() {
+
+	coinbaseTx := block.Transactions()[0]
+	coinbaseOuts := coinbaseTx.TxOut()
+	for i := range coinbaseOuts {
+		outpoint := &types.OutPoint{Hash: block.Hash(), Index: uint32(i)}
+		OutpointAndAddress := OutpointAndTxOut{outpoint, &coinbaseTx.TxOut()[i]}
+		spendableOutpoints = append(spendableOutpoints, OutpointAndAddress)
+		txTotal += 1
+	}
+
+	for _, tx := range block.Transactions()[1:] {
 		fmt.Printf("Received Transaction Hash: %s\n", tx.Hash().Hex())
 		for i := range tx.TxOut() {
 			outpoint := &types.OutPoint{Hash: tx.Hash(), Index: uint32(i)}
@@ -181,6 +191,7 @@ func getBlockAndTransactions(hash common.Hash) {
 		}
 		txTotal += 1
 	}
+
 	fmt.Println("num of spendable outs:", len(spendableOutpoints))
 	fmt.Println("sum of txs:           ", txTotal)
 	txMutex.Unlock()
@@ -205,21 +216,6 @@ func createTransactions() {
 	toAddress := common.HexToAddress("0x1aCC3AF2647375A76bFB813B9b22Ec08e179110A", location)
 
 	for {
-		hashMutex.Lock()
-		if len(headerHashes) > 0 {
-			// Use the first hash and remove it from the slice
-			hash := headerHashes[0]
-			headerHashes = headerHashes[1:]
-			hashMutex.Unlock()
-
-			// Now use this hash to create a transaction
-			makeUTXOTransaction(hash, 0, fromAddress, toAddress, btcecKey, uncompressedPubkey)
-		} else {
-			hashMutex.Unlock()
-			// Sleep for a while before checking again
-			// time.Sleep(1 * time.Second)
-		}
-
 		txMutex.Lock()
 		if len(spendableOutpoints) > 0 {
 			for _, item := range spendableOutpoints {
