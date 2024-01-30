@@ -91,9 +91,7 @@ func makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from co
 
 	signedTx := types.NewTx(signedUtxo)
 
-	txHash2 := signer.Hash(signedTx)
-
-	fmt.Println("Sent Transaction Hash    :", "0x"+common.Bytes2Hex(txHash2[:]))
+	fmt.Println("Sent Transaction Hash    :", signedTx.Hash().Hex())
 
 	// fmt.Println("Signature:", common.Bytes2Hex(sig.Serialize()))
 	// fmt.Println("Pubkey", common.Bytes2Hex(pubKey))
@@ -212,7 +210,6 @@ func createTransactions() {
 		txMutex.Lock()
 		if len(txHashes) > 0 {
 			for _, hash := range txHashes {
-				fmt.Println("TX Hash", hash.Hex())
 				makeUTXOTransaction(hash, 0, fromAddress, toAddress, btcecKey, uncompressedPubkey)
 				txHashes = txHashes[1:]
 			}
