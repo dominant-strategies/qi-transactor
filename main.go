@@ -21,9 +21,8 @@ import (
 	"github.com/dominant-strategies/go-quai/quaiclient/ethclient"
 )
 
-const httpUrl = "http://localhost:9003"
 const wsUrl = "ws://localhost:8003"
-const privKey = "345debf66bc68724062b236d3b0a6eb30f051e725ebb770f1dc367f2c569f003"
+const privKey = "c1b91eb8f37f2d116cd0f32c87a39878c53d7060d0242b19fa08cadd45e0cdd6"
 
 var location = common.Location{0, 0}
 
@@ -51,10 +50,23 @@ type blockInfo struct {
 var txTotal = 0
 var outpointTotal = 0
 
-func main() {
+type Transactor struct {
+	client *ethclient.Client
+}
 
-	go listenForNewBlocks()
-	go createTransactions()
+func main() {
+	wsClient, err := ethclient.Dial(wsUrl)
+	if err != nil {
+		log.Fatalf("Failed to connect to the Ethereum WebSocket client: %v", err)
+	}
+	defer wsClient.Close()
+
+	transactor := Transactor{
+		client: wsClient,
+	}
+
+	go transactor.listenForNewBlocks()
+	go transactor.createTransactions()
 
 	// Wait for an interrupt signal
 	quit := make(chan os.Signal, 1)
@@ -65,7 +77,7 @@ func main() {
 	// Perform any cleanup if necessary
 }
 
-func makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from common.Address, to common.Address, btcecKey *secp256k1.PrivateKey, pubKey []byte) *types.Transaction {
+func (transactor Transactor) makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from common.Address, to common.Address, btcecKey *secp256k1.PrivateKey, pubKey []byte) *types.Transaction {
 	// key = hash(blockHash, index)
 	// Find hash / index for originUtxo / imagine this is block hash
 	prevOut := *types.NewOutPoint(&outpointHash, outpointIndex)
@@ -107,19 +119,8 @@ func makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from co
 
 	signedTx := types.NewTx(signedUtxo)
 
-	// fmt.Println("Sent Transaction Hash    :", signedTx.Hash().Hex())
-
-	// fmt.Println("Signature:", common.Bytes2Hex(sig.Serialize()))
-	// fmt.Println("Pubkey", common.Bytes2Hex(pubKey))
-
-	// Connect to the Ethereum client
-	client, err := ethclient.Dial(httpUrl)
-	if err != nil {
-		log.Fatalf("Failed to connect to the Ethereum client: %v", err)
-	}
-
 	// Send the transaction
-	err = client.SendTransaction(context.Background(), signedTx)
+	err = transactor.client.SendTransaction(context.Background(), signedTx)
 	if err != nil {
 		log.Fatalf("Failed to send transaction: %v", err)
 	}
@@ -127,17 +128,10 @@ func makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from co
 	return tx
 }
 
-func listenForNewBlocks() {
-	// Connect to the Ethereum client via WebSocket
-	wsClient, err := ethclient.Dial(wsUrl)
-	if err != nil {
-		log.Fatalf("Failed to connect to the Ethereum WebSocket client: %v", err)
-	}
-	defer wsClient.Close()
-
+func (transactor Transactor) listenForNewBlocks() {
 	// Subscribe to new block headers
 	headers := make(chan *types.Header)
-	sub, err := wsClient.SubscribeNewHead(context.Background(), headers)
+	sub, err := transactor.client.SubscribeNewHead(context.Background(), headers)
 	if err != nil {
 		log.Fatalf("Failed to subscribe to new headers: %v", err)
 	}
@@ -154,23 +148,15 @@ func listenForNewBlocks() {
 			headerHashes = append(headerHashes, header.Hash())
 
 			time.Sleep(1 * time.Second)
-			getBlockAndTransactions(header.Hash())
+			transactor.getBlockAndTransactions(header.Hash())
 			hashMutex.Unlock()
 		}
 	}
 }
 
-func getBlockAndTransactions(hash common.Hash) {
-	// Connect to the Ethereum client
-	client, err := ethclient.Dial(httpUrl)
-	if err != nil {
-		log.Fatalf("Failed to connect to the Ethereum client: %v", err)
-	}
-
-	defer client.Close()
-
+func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 	// Retrieve the block by its hash
-	block, err := client.BlockByHash(context.Background(), hash)
+	block, err := transactor.client.BlockByHash(context.Background(), hash)
 	if err != nil {
 		fmt.Printf("Failed to retrieve the block: %s %s\n", hash, err)
 		return
@@ -230,7 +216,7 @@ func getBlockAndTransactions(hash common.Hash) {
 	txMutex.Unlock()
 }
 
-func createTransactions() {
+func (transactor Transactor) createTransactions() {
 	// Load your private key
 	privateKey, err := crypto.HexToECDSA(privKey)
 	if err != nil {
@@ -256,7 +242,7 @@ func createTransactions() {
 				// fmt.Println("item.outpoint.Index:", item.outpoint.Index)
 				// fmt.Println("item.txOut.Address:", common.Bytes2Hex(item.txOut.Address))
 				// fmt.Println("item.txOut.Denomination:", item.txOut.Denomination)
-				makeUTXOTransaction(item.outpoint.Hash, item.outpoint.Index, fromAddress, toAddress, btcecKey, uncompressedPubkey)
+				transactor.makeUTXOTransaction(item.outpoint.Hash, item.outpoint.Index, fromAddress, toAddress, btcecKey, uncompressedPubkey)
 
 				spendableOutpoints = spendableOutpoints[1:]
 			}
