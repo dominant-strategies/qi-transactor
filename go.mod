@@ -1,4 +1,4 @@
-module github.com/dominant-strategies/quai-utxo-example
+module github.com/dominant-strategies/qi-transactor
 
 go 1.21.1
 
