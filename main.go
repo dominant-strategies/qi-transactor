@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/big"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,9 +24,32 @@ import (
 )
 
 const wsUrl = "ws://localhost:8003"
-const privKey = "c1b91eb8f37f2d116cd0f32c87a39878c53d7060d0242b19fa08cadd45e0cdd6"
 
 var location = common.Location{0, 0}
+
+type AddressInfo struct {
+	Address    string
+	Index      int
+	Path       string
+	PrivateKey string
+}
+
+// New struct to hold JSON file structure
+type Allocation struct {
+	Groups map[string]map[string][]AddressInfo
+}
+
+type AddressData struct {
+	PrivateKey *secp256k1.PrivateKey // Map address to private key
+	Balance    *big.Int
+	Location   common.Location
+}
+
+var (
+	addressMap         map[string]AddressData        // Map address to balance and location
+	spendableOutpoints map[string][]OutpointAndTxOut // Map address to spendable outpoints
+	txMutex            sync.Mutex
+)
 
 type OutpointAndTxOut struct {
 	outpoint *types.OutPoint
@@ -37,9 +62,7 @@ var (
 	headerHashes []common.Hash
 	hashMutex    sync.Mutex
 
-	spendableOutpoints []OutpointAndTxOut
-	txMutex            sync.Mutex
-	blockInfos         []blockInfo // Slice to store information about the last 100 blocks
+	blockInfos []blockInfo // Slice to store information about the last 100 blocks
 )
 
 type blockInfo struct {
@@ -55,6 +78,10 @@ type Transactor struct {
 }
 
 func main() {
+	// Initialize maps
+	addressMap = make(map[string]AddressData)
+	spendableOutpoints = make(map[string][]OutpointAndTxOut)
+
 	wsClient, err := ethclient.Dial(wsUrl)
 	if err != nil {
 		log.Fatalf("Failed to connect to the Ethereum WebSocket client: %v", err)
@@ -63,6 +90,12 @@ func main() {
 
 	transactor := Transactor{
 		client: wsClient,
+	}
+
+	// Load addresses and private keys from JSON file
+	err = transactor.loadAddresses("test_gen_alloc.json", "group-0")
+	if err != nil {
+		log.Fatalf("Error loading addresses: %v", err)
 	}
 
 	go transactor.listenForNewBlocks()
@@ -77,6 +110,57 @@ func main() {
 	// Perform any cleanup if necessary
 }
 
+// Load addresses and private keys from a specified group in the JSON file
+func (transactor Transactor) loadAddresses(filename, groupName string) error {
+	data, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+
+	var alloc Allocation
+	if err := json.Unmarshal(data, &alloc); err != nil {
+		return err
+	}
+
+	group, exists := alloc.Groups[groupName]
+	if !exists {
+		return fmt.Errorf("group %s does not exist", groupName)
+	}
+
+	for _, zones := range group {
+		for _, info := range zones {
+			privateKey, err := crypto.HexToECDSA(info.PrivateKey[2:]) // Remove '0x' prefix
+			if err != nil {
+				log.Printf("Invalid private key for address %s: %v", info.Address, err)
+				continue
+			}
+			btcecKey, _ := btcec.PrivKeyFromBytes(privateKey.D.Bytes())
+			secpKey := secp256k1.PrivKeyFromBytes(btcecKey.Serialize())
+
+			lowStrAddress := strings.ToLower(info.Address)
+			address := common.HexToAddress(info.Address, location)
+
+			balance, err := transactor.client.QiBalance(context.Background(), address)
+			if err != nil {
+				log.Printf("Failed to get balance for address %s: %v", info.Address, err)
+				continue
+			}
+			fmt.Printf("Address %s, balance %d\n", info.Address, balance)
+
+			s := AddressData{
+				PrivateKey: secpKey,
+				Balance:    balance,
+				Location:   location,
+			}
+			addressMap[lowStrAddress] = s
+			// Initialize spendableOutpoints map for this address
+			spendableOutpoints[lowStrAddress] = make([]OutpointAndTxOut, 0)
+		}
+	}
+
+	return nil
+}
+
 func (transactor Transactor) makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from common.Address, to common.Address, btcecKey *secp256k1.PrivateKey, pubKey []byte) *types.Transaction {
 	// key = hash(blockHash, index)
 	// Find hash / index for originUtxo / imagine this is block hash
@@ -88,7 +172,7 @@ func (transactor Transactor) makeUTXOTransaction(outpointHash common.Hash, outpo
 	}
 
 	newOut := types.TxOut{
-		Denomination: uint8(1),
+		Denomination: uint8(0),
 		Address:      from.Bytes(),
 	}
 
@@ -185,71 +269,64 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 		}
 		if totalTime > 0 {
 			weightedTPS := float64(totalTransactions) / totalTime
-			fmt.Printf("Weighted TPS (last %d blocks): %f\n", len(blockInfos), weightedTPS)
+			fmt.Printf("Total Transactions: %d Weighted TPS (last %d blocks): %f\n", txTotal, len(blockInfos), weightedTPS)
 		}
 	}
 
 	// Iterate over and display transactions in the block
 	txMutex.Lock()
+	defer txMutex.Unlock()
+
 	coinbaseTx := block.Transactions()[0]
 	coinbaseOuts := coinbaseTx.TxOut()
 	for i := range coinbaseOuts {
+		addressStr := "0x" + common.Bytes2Hex(coinbaseOuts[0].Address)
+
 		outpoint := &types.OutPoint{Hash: block.Hash(), Index: uint32(i)}
-		OutpointAndAddress := OutpointAndTxOut{outpoint, &coinbaseTx.TxOut()[i]}
-		spendableOutpoints = append(spendableOutpoints, OutpointAndAddress)
+		outpointAndTxOut := OutpointAndTxOut{outpoint, &coinbaseTx.TxOut()[i]}
+		spendableOutpoints[addressStr] = append(spendableOutpoints[addressStr], outpointAndTxOut)
 		outpointTotal += 1
 	}
 	txTotal += 1
 
 	for _, tx := range block.Transactions()[1:] {
-		// fmt.Printf("Received Transaction Hash: %s\n", tx.Hash().Hex())
-		for i := range tx.TxOut() {
+		for i, txOut := range tx.TxOut() {
 			outpoint := &types.OutPoint{Hash: tx.Hash(), Index: uint32(i)}
-			OutpointAndAddress := OutpointAndTxOut{outpoint, &tx.TxOut()[i]}
-			spendableOutpoints = append(spendableOutpoints, OutpointAndAddress)
-			outpointTotal += 1
+			addressStr := "0x" + common.Bytes2Hex(txOut.Address)
+
+			// Check if the address is one of the loaded addresses with a private key
+			if _, exists := addressMap[addressStr]; exists {
+				outpointAndTxOut := OutpointAndTxOut{outpoint, &txOut}
+				// Append the outpoint to the spendableOutpoints map for the address
+				spendableOutpoints[addressStr] = append(spendableOutpoints[addressStr], outpointAndTxOut)
+			}
 		}
 		txTotal += 1
 	}
 
-	fmt.Println("tx sum:", txTotal, "outpoint sum:", outpointTotal, "current spendable outs", len(spendableOutpoints))
-	txMutex.Unlock()
+	// for address, outpoints := range spendableOutpoints {
+	// 	if len(outpoints) > 0 {
+	// 		fmt.Println("address", address, "current spendable outs", len(outpoints))
+	// 	}
+	// }
 }
 
 func (transactor Transactor) createTransactions() {
-	// Load your private key
-	privateKey, err := crypto.HexToECDSA(privKey)
-	if err != nil {
-		log.Fatalf("Invalid private key: %v", err)
-	}
-
-	b, err := hex.DecodeString(privKey)
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	// btcec key for schnorr use
-	btcecKey, _ := btcec.PrivKeyFromBytes(b)
-	uncompressedPubkey := btcecKey.PubKey().SerializeUncompressed()
-	fromAddress := crypto.PubkeyToAddress(privateKey.PublicKey, location)
-	toAddress := common.HexToAddress("0x1aCC3AF2647375A76bFB813B9b22Ec08e179110A", location)
-
 	for {
 		txMutex.Lock()
-		if len(spendableOutpoints) > 0 {
-			for _, item := range spendableOutpoints {
-				// fmt.Println("item.outpoint.Hash:", item.outpoint.Hash.Hex())
-				// fmt.Println("item.outpoint.Index:", item.outpoint.Index)
-				// fmt.Println("item.txOut.Address:", common.Bytes2Hex(item.txOut.Address))
-				// fmt.Println("item.txOut.Denomination:", item.txOut.Denomination)
-				transactor.makeUTXOTransaction(item.outpoint.Hash, item.outpoint.Index, fromAddress, toAddress, btcecKey, uncompressedPubkey)
-
-				spendableOutpoints = spendableOutpoints[1:]
+		for address, outpoints := range spendableOutpoints {
+			fromPrivateKey := addressMap[address].PrivateKey // Assuming addressMap holds the private keys
+			fromAddress := common.HexToAddress(address, location)
+			toAddress := fromAddress
+			for _, item := range outpoints {
+				// Assuming toAddress is defined earlier or you have a way to determine it
+				transactor.makeUTXOTransaction(item.outpoint.Hash, item.outpoint.Index, fromAddress, toAddress, fromPrivateKey, fromPrivateKey.PubKey().SerializeUncompressed())
+				// After processing an outpoint for an address, you might want to remove it or mark it as spent
 			}
-		} else {
-			// Sleep for a while before checking again
-			time.Sleep(1 * time.Second)
+			// Clear the processed outpoints for this address
+			spendableOutpoints[address] = nil
 		}
 		txMutex.Unlock()
+		time.Sleep(1 * time.Second) // Sleep to rate limit transaction creation
 	}
 }
