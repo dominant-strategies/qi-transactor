@@ -1,0 +1,15 @@
+{
+    "groups": {
+      "group-0": {
+        "zone-0-0": [
+          {
+            "address": "0x00AB45e8d7133feA381b988654B909a56763aB72",
+            "index": 0,
+            "path": "m/44'/994'/0'/0/0",
+            "privateKey": "0xc1b91eb8f37f2d116cd0f32c87a39878c53d7060d0242b19fa08cadd45e0cdd6"
+          }
+        ]
+      }
+    }
+  }
+  
