@@ -1,3 +1,4 @@
 .DS_Store
 .vscode
 test_gen_alloc.json
+gen_alloc_keys.json

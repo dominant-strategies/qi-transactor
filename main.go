@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"math/big"
+	"math/rand"
 	"os"
 	"os/signal"
 	"strings"
@@ -51,6 +52,12 @@ var (
 	txMutex            sync.Mutex
 )
 
+type GenesisUTXO struct {
+	Denomination int    `json:"denomination"`
+	Index        int    `json:"index"`
+	Hash         string `json:"hash"`
+}
+
 type OutpointAndTxOut struct {
 	outpoint *types.OutPoint
 	txOut    *types.TxOut
@@ -61,8 +68,7 @@ const maxBlocks = 100
 var (
 	headerHashes []common.Hash
 	hashMutex    sync.Mutex
-
-	blockInfos []blockInfo // Slice to store information about the last 100 blocks
+	blockInfos   []blockInfo // Slice to store information about the last 100 blocks
 )
 
 type blockInfo struct {
@@ -71,7 +77,6 @@ type blockInfo struct {
 }
 
 var txTotal = 0
-var outpointTotal = 0
 
 type Transactor struct {
 	client *ethclient.Client
@@ -93,9 +98,14 @@ func main() {
 	}
 
 	// Load addresses and private keys from JSON file
-	err = transactor.loadAddresses("test_gen_alloc.json", "group-0")
+	err = transactor.loadAddresses("gen_alloc_keys.json", "group-0")
 	if err != nil {
 		log.Fatalf("Error loading addresses: %v", err)
+	}
+
+	err = transactor.loadGenesisUtxos("gen_alloc_qi_cyprus1.json")
+	if err != nil {
+		log.Fatalf("Error loading genesis UTXOs: %v", err)
 	}
 
 	go transactor.listenForNewBlocks()
@@ -145,7 +155,7 @@ func (transactor Transactor) loadAddresses(filename, groupName string) error {
 				log.Printf("Failed to get balance for address %s: %v", info.Address, err)
 				continue
 			}
-			fmt.Printf("Address %s, balance %d\n", info.Address, balance)
+			fmt.Printf("Address %s, balance %d\n", lowStrAddress, balance)
 
 			s := AddressData{
 				PrivateKey: secpKey,
@@ -158,6 +168,34 @@ func (transactor Transactor) loadAddresses(filename, groupName string) error {
 		}
 	}
 
+	return nil
+}
+
+func (transactor Transactor) loadGenesisUtxos(filename string) error {
+	file, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("error reading file: %v", err)
+	}
+
+	var utxos map[string]GenesisUTXO
+	if err := json.Unmarshal(file, &utxos); err != nil {
+		return fmt.Errorf("error unmarshalling JSON: %v", err)
+	}
+
+	for address, utxo := range utxos {
+		hash := common.HexToHash(utxo.Hash)
+		outpoint := &types.OutPoint{Hash: hash, Index: uint32(utxo.Index)}
+		lowStrAddr := strings.ToLower(address)
+		addr := common.Hex2Bytes(lowStrAddr)
+		txOut := &types.TxOut{
+			Address:      addr,
+			Denomination: uint8(utxo.Denomination),
+		}
+		spendableOutpoints[lowStrAddr] = append(spendableOutpoints[lowStrAddr], OutpointAndTxOut{
+			outpoint: outpoint,
+			txOut:    txOut,
+		})
+	}
 	return nil
 }
 
@@ -277,17 +315,17 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 	txMutex.Lock()
 	defer txMutex.Unlock()
 
-	coinbaseTx := block.Transactions()[0]
-	coinbaseOuts := coinbaseTx.TxOut()
-	for i := range coinbaseOuts {
-		addressStr := "0x" + common.Bytes2Hex(coinbaseOuts[0].Address)
+	// coinbaseTx := block.Transactions()[0]
+	// coinbaseOuts := coinbaseTx.TxOut()
+	// for i := range coinbaseOuts {
+	// 	addressStr := "0x" + common.Bytes2Hex(coinbaseOuts[0].Address)
 
-		outpoint := &types.OutPoint{Hash: block.Hash(), Index: uint32(i)}
-		outpointAndTxOut := OutpointAndTxOut{outpoint, &coinbaseTx.TxOut()[i]}
-		spendableOutpoints[addressStr] = append(spendableOutpoints[addressStr], outpointAndTxOut)
-		outpointTotal += 1
-	}
-	txTotal += 1
+	// 	outpoint := &types.OutPoint{Hash: block.Hash(), Index: uint32(i)}
+	// 	outpointAndTxOut := OutpointAndTxOut{outpoint, &coinbaseTx.TxOut()[i]}
+	// 	spendableOutpoints[addressStr] = append(spendableOutpoints[addressStr], outpointAndTxOut)
+	// 	outpointTotal += 1
+	// }
+	// txTotal += 1
 
 	for _, tx := range block.Transactions()[1:] {
 		for i, txOut := range tx.TxOut() {
@@ -315,9 +353,24 @@ func (transactor Transactor) createTransactions() {
 	for {
 		txMutex.Lock()
 		for address, outpoints := range spendableOutpoints {
+			// check if address is in addressMap
+			if addressMap[address].PrivateKey == nil {
+				continue
+			}
 			fromPrivateKey := addressMap[address].PrivateKey // Assuming addressMap holds the private keys
 			fromAddress := common.HexToAddress(address, location)
-			toAddress := fromAddress
+			// get random address from addressMap
+			randIndex := rand.Intn(len(addressMap))
+			i := 0
+			var toAddressStr string
+			for key := range addressMap {
+				if i == randIndex {
+					toAddressStr = key
+					break
+				}
+				i++
+			}
+			toAddress := common.HexToAddress(toAddressStr, location)
 			for _, item := range outpoints {
 				// Assuming toAddress is defined earlier or you have a way to determine it
 				transactor.makeUTXOTransaction(item.outpoint.Hash, item.outpoint.Index, fromAddress, toAddress, fromPrivateKey, fromPrivateKey.PubKey().SerializeUncompressed())
