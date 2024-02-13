@@ -17,6 +17,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr/musig2"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/dominant-strategies/go-quai/common"
 	"github.com/dominant-strategies/go-quai/core/types"
@@ -199,37 +200,40 @@ func (transactor Transactor) loadGenesisUtxos(filename string) error {
 	return nil
 }
 
-func (transactor Transactor) makeUTXOTransaction(outpointHash common.Hash, outpointIndex uint32, from common.Address, to common.Address, btcecKey *secp256k1.PrivateKey, pubKey []byte) *types.Transaction {
+func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.TxOut, privKeys []*secp256k1.PrivateKey, pubKeys []*secp256k1.PublicKey) *types.Transaction {
 	// key = hash(blockHash, index)
 	// Find hash / index for originUtxo / imagine this is block hash
-	prevOut := *types.NewOutPoint(&outpointHash, outpointIndex)
-
-	in := types.TxIn{
-		PreviousOutPoint: prevOut,
-		PubKey:           pubKey,
-	}
-
-	newOut := types.TxOut{
-		Denomination: uint8(0),
-		Address:      from.Bytes(),
-	}
 
 	utxo := &types.UtxoTx{
 		ChainID: big.NewInt(1337),
-		TxIn:    []types.TxIn{in},
-		TxOut:   []types.TxOut{newOut},
+		TxIn:    ins,
+		TxOut:   outs,
 	}
 
 	tx := types.NewTx(utxo)
 
 	chainId := big.NewInt(1337)
+
+	if len(privKeys) != len(pubKeys) {
+		log.Fatal("Private keys and public keys must be the same length")
+	}
+
 	signer := types.NewSigner(chainId, location)
 
 	txHash := signer.Hash(tx)
 
-	sig, err := schnorr.Sign(btcecKey, txHash[:])
-	if err != nil {
-		log.Fatalf("Failed to sign transaction: %v", err)
+	var sig *schnorr.Signature
+	var err error
+	if len(privKeys) == 1 {
+		sig, err = schnorr.Sign(privKeys[0], txHash[:])
+		if err != nil {
+			log.Fatalf("Failed to sign transaction: %v", err)
+		}
+	} else {
+		sig, err = getAggSig(privKeys, pubKeys, txHash)
+		if err != nil {
+			log.Fatalf("Failed to sign transaction: %v", err)
+		}
 	}
 
 	signedUtxo := &types.UtxoTx{
@@ -350,36 +354,212 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 }
 
 func (transactor Transactor) createTransactions() {
+	rand.Seed(time.Now().UnixNano()) // Seed the random number generator
+
 	for {
 		txMutex.Lock()
 		for address, outpoints := range spendableOutpoints {
-			// check if address is in addressMap
-			if addressMap[address].PrivateKey == nil {
-				continue
+			if len(outpoints) == 0 || addressMap[address].PrivateKey == nil {
+				continue // Skip if no outpoints or no private key
 			}
-			fromPrivateKey := addressMap[address].PrivateKey // Assuming addressMap holds the private keys
-			fromAddress := common.HexToAddress(address, location)
-			// get random address from addressMap
-			randIndex := rand.Intn(len(addressMap))
-			i := 0
-			var toAddressStr string
-			for key := range addressMap {
-				if i == randIndex {
-					toAddressStr = key
-					break
+
+			// Randomly decide between 2 inputs to 1 out or 1 in to 9 outs
+			if rand.Intn(2) == 0 && len(outpoints) >= 2 { // 50% chance, and ensure at least 2 outpoints available
+				// Case 1: 2 inputs to 1 output
+				// Randomly select another outpoint from the same address
+				selectedOutpoints := spendableOutpoints[address][:2]
+
+				toAddressStr := getRandomAddress(addressMap)
+				toAddress := common.HexToAddress(toAddressStr, location)
+
+				ins, outs, privKeys, pubKeys := createInOutPairsForTransaction(selectedOutpoints, toAddress, addressMap[address].PrivateKey)
+				transactor.makeUTXOTransaction(ins, outs, privKeys, pubKeys)
+
+				spendableOutpoints[address] = spendableOutpoints[address][2:] // Remove the first 2 outpoints used
+			} else {
+				// Case 2: 1 input to 9 outputs
+				selectedOutpoint := outpoints[0] // Simplified selection; adjust as needed
+
+				if selectedOutpoint.txOut.Denomination < 2 {
+					// fmt.Println("Denomination too low to send to 9 outputs", selectedOutpoint.txOut.Denomination)
+					continue
 				}
-				i++
+				in := types.TxIn{
+					PreviousOutPoint: *types.NewOutPoint(&selectedOutpoint.outpoint.Hash, selectedOutpoint.outpoint.Index),
+					PubKey:           addressMap[address].PrivateKey.PubKey().SerializeUncompressed(),
+				}
+
+				outs := make([]types.TxOut, 9)
+				for i := 0; i < 9; i++ {
+					toAddressStr := getRandomAddress(addressMap)
+					toAddress := common.HexToAddress(toAddressStr, location)
+
+					outs[i] = types.TxOut{
+						Denomination: uint8(0), // Simplified; adjust denomination as needed
+						Address:      toAddress.Bytes(),
+					}
+				}
+
+				privKeys := []*secp256k1.PrivateKey{addressMap[address].PrivateKey}
+				pubKeys := []*secp256k1.PublicKey{addressMap[address].PrivateKey.PubKey()}
+
+				transactor.makeUTXOTransaction([]types.TxIn{in}, outs, privKeys, pubKeys)
+
+				spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
 			}
-			toAddress := common.HexToAddress(toAddressStr, location)
-			for _, item := range outpoints {
-				// Assuming toAddress is defined earlier or you have a way to determine it
-				transactor.makeUTXOTransaction(item.outpoint.Hash, item.outpoint.Index, fromAddress, toAddress, fromPrivateKey, fromPrivateKey.PubKey().SerializeUncompressed())
-				// After processing an outpoint for an address, you might want to remove it or mark it as spent
-			}
-			// Clear the processed outpoints for this address
-			spendableOutpoints[address] = nil
 		}
 		txMutex.Unlock()
 		time.Sleep(1 * time.Second) // Sleep to rate limit transaction creation
 	}
+}
+
+// Utility function to get a random address from addressMap, excluding the input address
+func getRandomAddress(addressMap map[string]AddressData) string {
+	keys := make([]string, 0, len(addressMap))
+	for k := range addressMap {
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return "" // Handle case where addressMap is empty
+	}
+	randIndex := rand.Intn(len(keys))
+	return keys[randIndex]
+}
+
+// Simplified function signature for creating input-output pairs; implement according to your actual types and logic
+func createInOutPairsForTransaction(outpoints []OutpointAndTxOut, toAddress common.Address, privateKey *secp256k1.PrivateKey) ([]types.TxIn, []types.TxOut, []*secp256k1.PrivateKey, []*secp256k1.PublicKey) {
+	var ins []types.TxIn
+	var denominations []uint8
+	var privKeys []*secp256k1.PrivateKey
+	var pubKeys []*secp256k1.PublicKey
+	for _, outpoint := range outpoints {
+		in := types.TxIn{
+			PreviousOutPoint: *types.NewOutPoint(&outpoint.outpoint.Hash, outpoint.outpoint.Index),
+			PubKey:           privateKey.PubKey().SerializeUncompressed(),
+		}
+		ins = append(ins, in)
+
+		denominations = append(denominations, outpoint.txOut.Denomination)
+		privKeys = append(privKeys, privateKey)
+		pubKeys = append(pubKeys, privateKey.PubKey())
+	}
+
+	outs := make([]types.TxOut, 1)
+	outs[0] = types.TxOut{
+		Denomination: denominations[0],
+		Address:      toAddress.Bytes(),
+	}
+
+	return ins, outs, privKeys, pubKeys
+}
+
+func getAggSig(privKeys []*secp256k1.PrivateKey, pubKeys []*secp256k1.PublicKey, txHash [32]byte) (*schnorr.Signature, error) {
+	keys := make([]*btcec.PrivateKey, len(privKeys))
+	copy(keys, privKeys)
+
+	signSet := make([]*btcec.PublicKey, len(pubKeys))
+	copy(signSet, pubKeys)
+
+	var combinedKey *btcec.PublicKey
+	var ctxOpts []musig2.ContextOption
+
+	ctxOpts = append(ctxOpts, musig2.WithKnownSigners(signSet))
+
+	// Now that we have all the signers, we'll make a new context, then
+	// generate a new session for each of them(which handles nonce
+	// generation).
+	signers := make([]*musig2.Session, len(keys))
+	for i, signerKey := range keys {
+		signCtx, err := musig2.NewContext(
+			signerKey, false, ctxOpts...,
+		)
+		if err != nil {
+			log.Fatalf("unable to generate context: %v", err)
+		}
+
+		if combinedKey == nil {
+			combinedKey, err = signCtx.CombinedKey()
+			if err != nil {
+				log.Fatalf("combined key not available: %v", err)
+			}
+		}
+
+		session, err := signCtx.NewSession()
+		if err != nil {
+			log.Fatalf("unable to generate new session: %v", err)
+		}
+		signers[i] = session
+	}
+
+	// Next, in the pre-signing phase, we'll send all the nonces to each
+	// signer.
+	var wg sync.WaitGroup
+	for i, signCtx := range signers {
+		signCtx := signCtx
+
+		wg.Add(1)
+		go func(idx int, signer *musig2.Session) {
+			defer wg.Done()
+
+			for j, otherCtx := range signers {
+				if idx == j {
+					continue
+				}
+
+				nonce := otherCtx.PublicNonce()
+				haveAll, err := signer.RegisterPubNonce(nonce)
+				if err != nil {
+					log.Fatalf("unable to add public nonce")
+				}
+
+				if j == len(signers)-1 && !haveAll {
+					log.Fatalf("all public nonces should have been detected")
+				}
+			}
+		}(i, signCtx)
+	}
+
+	wg.Wait()
+
+	// In the final step, we'll use the first signer as our combiner, and
+	// generate a signature for each signer, and then accumulate that with
+	// the combiner.
+	combiner := signers[0]
+	for i := range signers {
+		signer := signers[i]
+		partialSig, err := signer.Sign(txHash)
+		if err != nil {
+			log.Fatalf("unable to generate partial sig: %v", err)
+		}
+
+		// We don't need to combine the signature for the very first
+		// signer, as it already has that partial signature.
+		if i != 0 {
+			haveAll, err := combiner.CombineSig(partialSig)
+			if err != nil {
+				log.Fatalf("unable to combine sigs: %v", err)
+			}
+
+			if i == len(signers)-1 && !haveAll {
+				log.Fatalf("final sig wasn't reconstructed")
+			}
+		}
+	}
+
+	aggKey, _, _, _ := musig2.AggregateKeys(
+		signSet, false,
+	)
+
+	if !aggKey.FinalKey.IsEqual(combinedKey) {
+		log.Fatalf("aggKey is invalid!")
+	}
+
+	// Finally we'll combined all the nonces, and ensure that it validates
+	// as a single schnorr signature.
+	finalSig := combiner.FinalSig()
+	if !finalSig.Verify(txHash[:], combinedKey) {
+		log.Fatalf("final sig is invalid!")
+	}
+
+	return finalSig, nil
 }
