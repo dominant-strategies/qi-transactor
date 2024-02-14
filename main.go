@@ -367,21 +367,13 @@ func (transactor Transactor) createTransactions() {
 			if rand.Intn(2) == 0 && len(outpoints) >= 2 { // 50% chance, and ensure at least 2 outpoints available
 				// Case 1: 2 inputs to 1 output
 				// Randomly select another outpoint from the same address
-				selectedOutpoints := spendableOutpoints[address][:2]
-
-				toAddressStr := getRandomAddress(addressMap)
-				toAddress := common.HexToAddress(toAddressStr, location)
-
-				ins, outs, privKeys, pubKeys := createInOutPairsForTransaction(selectedOutpoints, toAddress, addressMap[address].PrivateKey)
-				transactor.makeUTXOTransaction(ins, outs, privKeys, pubKeys)
-
-				spendableOutpoints[address] = spendableOutpoints[address][2:] // Remove the first 2 outpoints used
+				transactor.sendTwoToOneTransaction(address)
 			} else {
 				// Case 2: 1 input to 9 outputs
 				selectedOutpoint := outpoints[0] // Simplified selection; adjust as needed
 
 				if selectedOutpoint.txOut.Denomination < 2 {
-					// fmt.Println("Denomination too low to send to 9 outputs", selectedOutpoint.txOut.Denomination)
+					transactor.sendTwoToOneTransaction(address)
 					continue
 				}
 				in := types.TxIn{
@@ -411,6 +403,21 @@ func (transactor Transactor) createTransactions() {
 		txMutex.Unlock()
 		time.Sleep(1 * time.Second) // Sleep to rate limit transaction creation
 	}
+}
+
+func (transactor Transactor) sendTwoToOneTransaction(address string) {
+	if len(spendableOutpoints[address]) < 2 {
+		return
+	}
+	selectedOutpoints := spendableOutpoints[address][:2]
+
+	toAddressStr := getRandomAddress(addressMap)
+	toAddress := common.HexToAddress(toAddressStr, location)
+
+	ins, outs, privKeys, pubKeys := createInOutPairsForTransaction(selectedOutpoints, toAddress, addressMap[address].PrivateKey)
+	transactor.makeUTXOTransaction(ins, outs, privKeys, pubKeys)
+
+	spendableOutpoints[address] = spendableOutpoints[address][2:] // Remove the first 2 outpoints used
 }
 
 // Utility function to get a random address from addressMap, excluding the input address
