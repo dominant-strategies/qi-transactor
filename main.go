@@ -451,12 +451,11 @@ func (transactor Transactor) createTransactions() {
 					}
 
 					outs[i] = types.TxOut{
-						Denomination: uint8(0), // Simplified; adjust denomination as needed
+						Denomination: uint8(selectedOutpoint.txOut.Denomination - 1), // Simplified; adjust denomination as needed
 						Address:      toAddress.Bytes(),
 					}
 
 					addresses[toAddress.Bytes20()] = struct{}{}
-
 				}
 
 				privKeys := []*secp256k1.PrivateKey{addressMap[address].PrivateKey}
