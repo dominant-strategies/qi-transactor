@@ -43,8 +43,8 @@ type Allocation struct {
 
 type AddressData struct {
 	PrivateKey *secp256k1.PrivateKey // Map address to private key
-	Balance    *big.Int
-	Location   common.Location
+	// Balance    *big.Int
+	Location common.Location
 }
 
 var (
@@ -99,7 +99,7 @@ func main() {
 	}
 
 	// Load addresses and private keys from JSON file
-	err = transactor.loadAddresses("gen_alloc_keys.json", "group-0")
+	err = transactor.loadAddresses("gen_alloc_qi_keys.json", "group-0")
 	if err != nil {
 		log.Fatalf("Error loading addresses: %v", err)
 	}
@@ -149,19 +149,19 @@ func (transactor Transactor) loadAddresses(filename, groupName string) error {
 			secpKey := secp256k1.PrivKeyFromBytes(btcecKey.Serialize())
 
 			lowStrAddress := strings.ToLower(info.Address)
-			address := common.HexToAddress(info.Address, location)
+			// address := common.HexToAddress(info.Address, location)
 
-			balance, err := transactor.client.QiBalance(context.Background(), address)
-			if err != nil {
-				log.Printf("Failed to get balance for address %s: %v", info.Address, err)
-				continue
-			}
-			fmt.Printf("Address %s, balance %d\n", lowStrAddress, balance)
+			// balance, err := transactor.client.QiBalance(context.Background(), address)
+			// if err != nil {
+			// 	log.Printf("Failed to get balance for address %s: %v", info.Address, err)
+			// 	continue
+			// }
+			// fmt.Printf("Address %s, balance %d\n", lowStrAddress, balance)
 
 			s := AddressData{
 				PrivateKey: secpKey,
-				Balance:    balance,
-				Location:   location,
+				// Balance:    balance,
+				Location: location,
 			}
 			addressMap[lowStrAddress] = s
 			// Initialize spendableOutpoints map for this address
@@ -185,7 +185,7 @@ func (transactor Transactor) loadGenesisUtxos(filename string) error {
 
 	for address, utxo := range utxos {
 		hash := common.HexToHash(utxo.Hash)
-		outpoint := &types.OutPoint{Hash: hash, Index: uint32(utxo.Index)}
+		outpoint := &types.OutPoint{TxHash: hash, Index: uint16(utxo.Index)}
 		lowStrAddr := strings.ToLower(address)
 		addr := common.Hex2Bytes(lowStrAddr)
 		txOut := &types.TxOut{
@@ -204,7 +204,7 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 	// key = hash(blockHash, index)
 	// Find hash / index for originUtxo / imagine this is block hash
 
-	utxo := &types.UtxoTx{
+	utxo := &types.QiTx{
 		ChainID: big.NewInt(1337),
 		TxIn:    ins,
 		TxOut:   outs,
@@ -236,7 +236,7 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 		}
 	}
 
-	signedUtxo := &types.UtxoTx{
+	signedUtxo := &types.QiTx{
 		ChainID:   big.NewInt(1337),
 		TxIn:      tx.TxIn(),
 		TxOut:     tx.TxOut(),
@@ -333,7 +333,7 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 
 	for _, tx := range block.Transactions()[1:] {
 		for i, txOut := range tx.TxOut() {
-			outpoint := &types.OutPoint{Hash: tx.Hash(), Index: uint32(i)}
+			outpoint := &types.OutPoint{TxHash: tx.Hash(), Index: uint16(i)}
 			addressStr := "0x" + common.Bytes2Hex(txOut.Address)
 
 			// Check if the address is one of the loaded addresses with a private key
@@ -377,7 +377,7 @@ func (transactor Transactor) createTransactions() {
 					continue
 				}
 				in := types.TxIn{
-					PreviousOutPoint: *types.NewOutPoint(&selectedOutpoint.outpoint.Hash, selectedOutpoint.outpoint.Index),
+					PreviousOutPoint: *types.NewOutPoint(&selectedOutpoint.outpoint.TxHash, selectedOutpoint.outpoint.Index),
 					PubKey:           addressMap[address].PrivateKey.PubKey().SerializeUncompressed(),
 				}
 
@@ -441,7 +441,7 @@ func createInOutPairsForTransaction(outpoints []OutpointAndTxOut, toAddress comm
 	var pubKeys []*secp256k1.PublicKey
 	for _, outpoint := range outpoints {
 		in := types.TxIn{
-			PreviousOutPoint: *types.NewOutPoint(&outpoint.outpoint.Hash, outpoint.outpoint.Index),
+			PreviousOutPoint: *types.NewOutPoint(&outpoint.outpoint.TxHash, outpoint.outpoint.Index),
 			PubKey:           privateKey.PubKey().SerializeUncompressed(),
 		}
 		ins = append(ins, in)
