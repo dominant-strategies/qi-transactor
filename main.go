@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"flag"
+
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr/musig2"
@@ -25,9 +27,12 @@ import (
 	"github.com/dominant-strategies/go-quai/quaiclient/ethclient"
 )
 
-const wsUrl = "ws://localhost:8003"
-
-var location = common.Location{0, 0}
+var (
+	wsUrl        string
+	location     common.Location
+	genAllocPath string
+	selectedZone string
+)
 
 type AddressInfo struct {
 	Address    string
@@ -84,6 +89,57 @@ type Transactor struct {
 }
 
 func main() {
+	// Define a string flag to capture the zone input
+	zoneFlag := flag.String("zone", "", "Zone flag to set the wsUrl and location (e.g., zone-0-0, zone-0-1, ... zone-2-2)")
+
+	// Parse the flags
+	flag.Parse()
+
+	// Set wsUrl and location based on the zoneFlag
+	switch *zoneFlag {
+	case "zone-0-0":
+		wsUrl = "ws://127.0.0.1:8100"
+		location = common.Location{0, 0}
+		genAllocPath = "genallocs/gen_alloc_qi_cyprus1.json"
+	case "zone-0-1":
+		wsUrl = "ws://127.0.0.1:8101"
+		location = common.Location{0, 1}
+		genAllocPath = "genallocs/gen_alloc_qi_cyprus2.json"
+	case "zone-0-2":
+		wsUrl = "ws://127.0.0.1:8102"
+		location = common.Location{0, 2}
+		genAllocPath = "genallocs/gen_alloc_qi_cyprus3.json"
+	case "zone-1-0":
+		wsUrl = "ws://127.0.0.1:8120"
+		location = common.Location{1, 0}
+		genAllocPath = "genallocs/gen_alloc_qi_paxos1.json"
+	case "zone-1-1":
+		wsUrl = "ws://127.0.0.1:8121"
+		location = common.Location{1, 1}
+		genAllocPath = "genallocs/gen_alloc_qi_paxos2.json"
+	case "zone-1-2":
+		wsUrl = "ws://127.0.0.1:8122"
+		location = common.Location{1, 2}
+		genAllocPath = "genallocs/gen_alloc_qi_paxos3.json"
+	case "zone-2-0":
+		wsUrl = "ws://127.0.0.1:8140"
+		location = common.Location{2, 0}
+		genAllocPath = "genallocs/gen_alloc_qi_hydra1.json"
+	case "zone-2-1":
+		wsUrl = "ws://127.0.0.1:8141"
+		location = common.Location{2, 1}
+		genAllocPath = "genallocs/gen_alloc_qi_hydra2.json"
+	case "zone-2-2":
+		wsUrl = "ws://127.0.0.1:8142"
+		location = common.Location{2, 2}
+		genAllocPath = "genallocs/gen_alloc_qi_hydra3.json"
+	default:
+		// Handle default case or invalid zone
+		log.Fatalf("Invalid or no zone specified")
+	}
+
+	selectedZone = *zoneFlag
+
 	// Initialize maps
 	addressMap = make(map[string]AddressData)
 	spendableOutpoints = make(map[string][]OutpointAndTxOut)
@@ -104,7 +160,7 @@ func main() {
 		log.Fatalf("Error loading addresses: %v", err)
 	}
 
-	err = transactor.loadGenesisUtxos("gen_alloc_qi_cyprus1.json")
+	err = transactor.loadGenesisUtxos(genAllocPath)
 	if err != nil {
 		log.Fatalf("Error loading genesis UTXOs: %v", err)
 	}
@@ -138,35 +194,34 @@ func (transactor Transactor) loadAddresses(filename, groupName string) error {
 		return fmt.Errorf("group %s does not exist", groupName)
 	}
 
-	for _, zones := range group {
-		for _, info := range zones {
-			privateKey, err := crypto.HexToECDSA(info.PrivateKey[2:]) // Remove '0x' prefix
-			if err != nil {
-				log.Printf("Invalid private key for address %s: %v", info.Address, err)
-				continue
-			}
-			btcecKey, _ := btcec.PrivKeyFromBytes(privateKey.D.Bytes())
-			secpKey := secp256k1.PrivKeyFromBytes(btcecKey.Serialize())
-
-			lowStrAddress := strings.ToLower(info.Address)
-			// address := common.HexToAddress(info.Address, location)
-
-			// balance, err := transactor.client.QiBalance(context.Background(), address)
-			// if err != nil {
-			// 	log.Printf("Failed to get balance for address %s: %v", info.Address, err)
-			// 	continue
-			// }
-			// fmt.Printf("Address %s, balance %d\n", lowStrAddress, balance)
-
-			s := AddressData{
-				PrivateKey: secpKey,
-				// Balance:    balance,
-				Location: location,
-			}
-			addressMap[lowStrAddress] = s
-			// Initialize spendableOutpoints map for this address
-			spendableOutpoints[lowStrAddress] = make([]OutpointAndTxOut, 0)
+	zoneData := group[selectedZone]
+	for _, info := range zoneData {
+		privateKey, err := crypto.HexToECDSA(info.PrivateKey[2:]) // Remove '0x' prefix
+		if err != nil {
+			log.Printf("Invalid private key for address %s: %v", info.Address, err)
+			continue
 		}
+		btcecKey, _ := btcec.PrivKeyFromBytes(privateKey.D.Bytes())
+		secpKey := secp256k1.PrivKeyFromBytes(btcecKey.Serialize())
+
+		lowStrAddress := strings.ToLower(info.Address)
+		// address := common.HexToAddress(info.Address, location)
+
+		// balance, err := transactor.client.QiBalance(context.Background(), address)
+		// if err != nil {
+		// 	log.Printf("Failed to get balance for address %s: %v", info.Address, err)
+		// 	continue
+		// }
+		// fmt.Printf("Address %s, balance %d\n", lowStrAddress, balance)
+
+		s := AddressData{
+			PrivateKey: secpKey,
+			// Balance:    balance,
+			Location: location,
+		}
+		addressMap[lowStrAddress] = s
+		// Initialize spendableOutpoints map for this address
+		spendableOutpoints[lowStrAddress] = make([]OutpointAndTxOut, 0)
 	}
 
 	return nil
@@ -367,29 +422,41 @@ func (transactor Transactor) createTransactions() {
 			if rand.Intn(2) == 0 && len(outpoints) >= 2 { // 50% chance, and ensure at least 2 outpoints available
 				// Case 1: 2 inputs to 1 output
 				// Randomly select another outpoint from the same address
-				transactor.sendTwoToOneTransaction(address)
+				// transactor.sendTwoToOneTransaction(address)
 			} else {
 				// Case 2: 1 input to 9 outputs
 				selectedOutpoint := outpoints[0] // Simplified selection; adjust as needed
+				addresses := make(map[common.AddressBytes]struct{})
 
-				if selectedOutpoint.txOut.Denomination < 2 {
-					transactor.sendTwoToOneTransaction(address)
-					continue
-				}
+				// if selectedOutpoint.txOut.Denomination < 2 {
+				// 	transactor.sendTwoToOneTransaction(address)
+				// 	continue
+				// }
 				in := types.TxIn{
 					PreviousOutPoint: *types.NewOutPoint(&selectedOutpoint.outpoint.TxHash, selectedOutpoint.outpoint.Index),
 					PubKey:           addressMap[address].PrivateKey.PubKey().SerializeUncompressed(),
 				}
+
+				byteAddress := common.HexToAddress(address, location)
+				addresses[byteAddress.Bytes20()] = struct{}{}
 
 				outs := make([]types.TxOut, 9)
 				for i := 0; i < 9; i++ {
 					toAddressStr := getRandomAddress(addressMap)
 					toAddress := common.HexToAddress(toAddressStr, location)
 
+					if _, exists := addresses[toAddress.Bytes20()]; exists {
+						i-- // Try again if the address is already used
+						continue
+					}
+
 					outs[i] = types.TxOut{
 						Denomination: uint8(0), // Simplified; adjust denomination as needed
 						Address:      toAddress.Bytes(),
 					}
+
+					addresses[toAddress.Bytes20()] = struct{}{}
+
 				}
 
 				privKeys := []*secp256k1.PrivateKey{addressMap[address].PrivateKey}
@@ -409,6 +476,7 @@ func (transactor Transactor) sendTwoToOneTransaction(address string) {
 	if len(spendableOutpoints[address]) < 2 {
 		return
 	}
+
 	selectedOutpoints := spendableOutpoints[address][:2]
 
 	toAddressStr := getRandomAddress(addressMap)
