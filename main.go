@@ -450,6 +450,11 @@ func (transactor Transactor) createTransactions() {
 						continue
 					}
 
+					if selectedOutpoint.txOut.Denomination == 2 {
+						fmt.Println("At minimum denomination")
+						continue
+					}
+
 					outs[i] = types.TxOut{
 						Denomination: uint8(selectedOutpoint.txOut.Denomination - 1), // Simplified; adjust denomination as needed
 						Address:      toAddress.Bytes(),
