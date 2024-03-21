@@ -48,8 +48,8 @@ type Allocation struct {
 
 type AddressData struct {
 	PrivateKey *secp256k1.PrivateKey // Map address to private key
-	// Balance    *big.Int
-	Location common.Location
+	Balance    *big.Int
+	Location   common.Location
 }
 
 var (
@@ -194,6 +194,9 @@ func (transactor Transactor) loadAddresses(filename, groupName string) error {
 		return fmt.Errorf("group %s does not exist", groupName)
 	}
 
+	txMutex.Lock()
+	defer txMutex.Unlock()
+
 	zoneData := group[selectedZone]
 	for _, info := range zoneData {
 		privateKey, err := crypto.HexToECDSA(info.PrivateKey[2:]) // Remove '0x' prefix
@@ -212,12 +215,14 @@ func (transactor Transactor) loadAddresses(filename, groupName string) error {
 		// 	log.Printf("Failed to get balance for address %s: %v", info.Address, err)
 		// 	continue
 		// }
-		// fmt.Printf("Address %s, balance %d\n", lowStrAddress, balance)
+
+		balance := big.NewInt(100000000)
+		// fmt.Printf("Loading Address: %s, balance %d\n", lowStrAddress, balance)
 
 		s := AddressData{
 			PrivateKey: secpKey,
-			// Balance:    balance,
-			Location: location,
+			Balance:    balance,
+			Location:   location,
 		}
 		addressMap[lowStrAddress] = s
 		// Initialize spendableOutpoints map for this address
@@ -303,7 +308,7 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 	// Send the transaction
 	err = transactor.client.SendTransaction(context.Background(), signedTx)
 	if err != nil {
-		log.Fatalf("Failed to send transaction: %v", err)
+		log.Printf("Failed to send transaction: %v", err)
 	}
 
 	return tx
@@ -396,11 +401,16 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 				outpointAndTxOut := OutpointAndTxOut{outpoint, &txOut}
 				// Append the outpoint to the spendableOutpoints map for the address
 				spendableOutpoints[addressStr] = append(spendableOutpoints[addressStr], outpointAndTxOut)
+
+				// Track the balance of added outpoints
+				addressMap[addressStr].Balance.Add(addressMap[addressStr].Balance, types.Denominations[txOut.Denomination])
+				// fmt.Printf("Receiving Address: %s, balance %d\n", addressStr, addressMap[addressStr].Balance)
 			}
 		}
 		txTotal += 1
 	}
 
+	// Useful print for debugging
 	// for address, outpoints := range spendableOutpoints {
 	// 	if len(outpoints) > 0 {
 	// 		fmt.Println("address", address, "current spendable outs", len(outpoints))
@@ -440,8 +450,13 @@ func (transactor Transactor) createTransactions() {
 				byteAddress := common.HexToAddress(address, location)
 				addresses[byteAddress.Bytes20()] = struct{}{}
 
-				outs := make([]types.TxOut, 9)
-				for i := 0; i < 9; i++ {
+				numOuts := 9
+				if selectedOutpoint.txOut.Denomination < 13 {
+					numOuts = 2
+				}
+
+				outs := make([]types.TxOut, numOuts)
+				for i := 0; i < numOuts; i++ {
 					toAddressStr := getRandomAddress(addressMap)
 					toAddress := common.HexToAddress(toAddressStr, location)
 
@@ -452,15 +467,54 @@ func (transactor Transactor) createTransactions() {
 
 					if selectedOutpoint.txOut.Denomination == 2 {
 						fmt.Println("At minimum denomination")
+						i-- // Try again if the address is already used
 						continue
 					}
 
+					// Skip to account for 9 outputs with denominations, i.e 100000 to 10000 x 9
+					denomIndex := selectedOutpoint.txOut.Denomination - 2
+
+					if _, exists := addressMap[toAddressStr]; !exists {
+						fmt.Println("Address not found")
+						i-- // Try again if the address is already used
+						continue
+					}
+
+					if addressMap[toAddressStr].Balance == nil {
+						fmt.Println("Balance not found")
+						i-- // Try again if the address is already used
+						continue
+					}
+
+					addressData, exists := addressMap[toAddressStr]
+					if !exists || addressData.Balance == nil {
+						i-- // Try again if the address is already used
+						continue
+					}
+
+					if addressData.Balance.Cmp(types.Denominations[uint8(denomIndex)]) < 1 {
+						i-- // Try again if the address has insufficient balance
+						continue
+					}
+
+					if !toAddress.IsInQiLedgerScope() {
+						log.Fatalf("Sending to Quai address %s", toAddressStr)
+					}
+
 					outs[i] = types.TxOut{
-						Denomination: uint8(selectedOutpoint.txOut.Denomination - 1), // Simplified; adjust denomination as needed
+						Denomination: uint8(denomIndex), // Simplified; adjust denomination as needed
 						Address:      toAddress.Bytes(),
 					}
 
+					// Track the balance of added outpoints
+					addressMap[toAddressStr].Balance.Sub(addressMap[toAddressStr].Balance, types.Denominations[uint8(denomIndex)])
+					// fmt.Printf("Sending Address: %s, balance %d\n", toAddressStr, addressMap[toAddressStr].Balance)
+
 					addresses[toAddress.Bytes20()] = struct{}{}
+				}
+
+				if len(outs) == 0 {
+					continue
 				}
 
 				privKeys := []*secp256k1.PrivateKey{addressMap[address].PrivateKey}
