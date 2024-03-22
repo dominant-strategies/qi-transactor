@@ -296,10 +296,7 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 		if err != nil {
 			log.Fatalf("Failed to sign transaction: %v", err)
 		}
-
-		fmt.Println("Using single signature")
 	} else {
-		fmt.Println("Using aggregate signature")
 		sig, err = getAggSig(privKeys, pubKeys, txHash)
 		if err != nil {
 			log.Fatalf("Failed to sign transaction: %v", err)
@@ -487,7 +484,7 @@ func (transactor Transactor) createTransactions() {
 				numOuts = 2
 			}
 
-			outs := make([]types.TxOut, numOuts)
+			outs := make([]types.TxOut, 0)
 			for i := 0; i < numOuts; i++ {
 				toAddressStr := getRandomAddress(addressMap)
 				toAddress := common.HexToAddress(toAddressStr, location)
@@ -520,10 +517,11 @@ func (transactor Transactor) createTransactions() {
 					continue
 				}
 
-				outs[i] = types.TxOut{
+				newOut := types.TxOut{
 					Denomination: uint8(denomIndex), // Simplified; adjust denomination as needed
 					Address:      toAddress.Bytes(),
 				}
+				outs = append(outs, newOut)
 
 				// Track the balance of added outpoints
 				addressMap[toAddressStr].Balance.Sub(addressMap[toAddressStr].Balance, types.Denominations[uint8(denomIndex)])
@@ -533,7 +531,6 @@ func (transactor Transactor) createTransactions() {
 			if len(outs) == numOuts {
 				privKeys := []*secp256k1.PrivateKey{addressMap[address].PrivateKey}
 				pubKeys := []*secp256k1.PublicKey{addressMap[address].PrivateKey.PubKey()}
-
 				transactor.makeUTXOTransaction([]types.TxIn{in}, outs, privKeys, pubKeys)
 
 				spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
@@ -560,7 +557,7 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 	ins := make([]types.TxIn, 0)
 	outs := make([]types.TxOut, 0)
 
-	consolidateDemonIndex := 15
+	consolidateDemonIndex := 14
 
 	newOutpoint := types.TxOut{
 		Denomination: uint8(consolidateDemonIndex),
@@ -568,16 +565,23 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 	}
 	outs = append(outs, newOutpoint)
 
+	addresses := make(map[string]struct{})
+	fmt.Println("Consolidating outpoints", len(lowDenomOutpoints))
 	for _, consolidateItem := range lowDenomOutpoints {
 		address := consolidateItem.address
 		// Skip the address that we are consolidating to
 		if address == toAddressStr {
 			continue
 		}
+		if _, exists := addresses[address]; exists {
+			continue
+		}
+
+		addresses[address] = struct{}{}
 		privKeys = append(privKeys, addressMap[address].PrivateKey)
 		pubKeys = append(pubKeys, addressMap[address].PrivateKey.PubKey())
 		ins = append(ins, consolidateItem.newInput)
-		if len(ins) == 10 {
+		if len(ins) == 11 {
 			// Send consolidated transaction
 			fmt.Println("Sending consolidated transaction", len(ins), len(outs), len(privKeys), len(pubKeys))
 			transactor.makeUTXOTransaction(ins, outs, privKeys, pubKeys)
@@ -586,7 +590,7 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 			privKeys = make([]*secp256k1.PrivateKey, 0)
 			pubKeys = make([]*secp256k1.PublicKey, 0)
 			ins = make([]types.TxIn, 0)
-			outs = make([]types.TxOut, 0)
+			addresses = make(map[string]struct{})
 		}
 	}
 }
