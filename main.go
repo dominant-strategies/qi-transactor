@@ -315,10 +315,6 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 	// Verify the transaction signature
 	var finalKey *btcec.PublicKey
 	if len(tx.TxIn()) > 1 {
-		fmt.Println("more than one input, len keys: ", len(pubKeys))
-		for _, key := range pubKeys {
-			fmt.Println("key: ", key.SerializeUncompressed())
-		}
 		aggKey, _, _, err := musig2.AggregateKeys(
 			pubKeys, false,
 		)
@@ -335,13 +331,6 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 	}
 
 	txDigestHash := signer.Hash(tx)
-
-	// Debugging the public keys and signature
-	if len(tx.TxIn()) > 1 {
-		fmt.Println("tx digest hash: ", txDigestHash.String())
-		fmt.Println("tx signature: ", signedTx.GetSchnorrSignature().Serialize())
-		fmt.Println("final key: ", finalKey.SerializeCompressed())
-	}
 	if !signedTx.GetSchnorrSignature().Verify(txDigestHash[:], finalKey) {
 		log.Fatalf("Failed to verify signature, len pubkeys %d", len(pubKeys))
 		return nil
@@ -350,7 +339,7 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 	// Send the transaction
 	err = transactor.client.SendTransaction(context.Background(), signedTx)
 	if err != nil {
-		log.Printf("Failed to send transaction: %v", err)
+		log.Fatalf("Failed to send transaction: %v", err)
 	}
 
 	return tx
@@ -497,7 +486,7 @@ func (transactor Transactor) createTransactions() {
 				if selectedOutpoint.txOut.Denomination == 13 {
 					consolidateItem := ConsolidatedOutpoint{
 						newInput: in,
-						address:  toAddressStr,
+						address:  address,
 					}
 
 					lowDenomOutpoints = append(lowDenomOutpoints, consolidateItem)
@@ -567,6 +556,7 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 
 	addresses := make(map[string]struct{})
 	fmt.Println("Consolidating outpoints", len(lowDenomOutpoints))
+	fmt.Println("to address", toAddressStr)
 	for _, consolidateItem := range lowDenomOutpoints {
 		address := consolidateItem.address
 		// Skip the address that we are consolidating to
@@ -581,17 +571,18 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 		privKeys = append(privKeys, addressMap[address].PrivateKey)
 		pubKeys = append(pubKeys, addressMap[address].PrivateKey.PubKey())
 		ins = append(ins, consolidateItem.newInput)
-		if len(ins) == 11 {
+
+		if len(ins) == 10 {
 			// Send consolidated transaction
 			fmt.Println("Sending consolidated transaction", len(ins), len(outs), len(privKeys), len(pubKeys))
 			transactor.makeUTXOTransaction(ins, outs, privKeys, pubKeys)
-
 			// Reset
 			privKeys = make([]*secp256k1.PrivateKey, 0)
 			pubKeys = make([]*secp256k1.PublicKey, 0)
 			ins = make([]types.TxIn, 0)
 			addresses = make(map[string]struct{})
 		}
+		time.Sleep(1 * time.Second) // Sleep to rate limit transaction creation
 	}
 }
 
