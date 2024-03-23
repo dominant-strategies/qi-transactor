@@ -456,7 +456,7 @@ func (transactor Transactor) createTransactions() {
 		count := 0
 		for address, outpoints := range spendableOutpoints {
 			// count to let the block listener process
-			if count > 50 {
+			if count > 300 {
 				break
 			}
 			count++
