@@ -88,7 +88,7 @@ type ConsolidatedOutpoint struct {
 }
 
 var txTotal = 0
-var MIN_DENOMINATION = uint8(13)
+var MIN_DENOMINATION = uint8(2) // 2 for usual, 13 for testing
 
 type Transactor struct {
 	client *ethclient.Client
@@ -339,7 +339,7 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 	// Send the transaction
 	err = transactor.client.SendTransaction(context.Background(), signedTx)
 	if err != nil {
-		log.Fatalf("Failed to send transaction: %v", err)
+		log.Printf("Failed to send transaction: %v", err)
 	}
 
 	return tx
@@ -469,7 +469,7 @@ func (transactor Transactor) createTransactions() {
 			addresses[byteAddress.Bytes20()] = struct{}{}
 
 			numOuts := 9
-			if selectedOutpoint.txOut.Denomination < MIN_DENOMINATION {
+			if selectedOutpoint.txOut.Denomination < 13 {
 				numOuts = 2
 			}
 
@@ -483,7 +483,7 @@ func (transactor Transactor) createTransactions() {
 					continue
 				}
 
-				if selectedOutpoint.txOut.Denomination == 13 {
+				if selectedOutpoint.txOut.Denomination == MIN_DENOMINATION {
 					consolidateItem := ConsolidatedOutpoint{
 						newInput: in,
 						address:  address,
@@ -500,6 +500,10 @@ func (transactor Transactor) createTransactions() {
 
 				// Skip to account for 9 outputs with denominations, i.e 100000 to 10000 x 9
 				denomIndex := selectedOutpoint.txOut.Denomination - 2
+				if denomIndex == 0 {
+					fmt.Println("denomIndex is 0")
+					continue
+				}
 				addressData := addressMap[toAddressStr]
 				if addressData.Balance.Cmp(types.Denominations[uint8(denomIndex)]) < 1 {
 					i-- // Try again if the address has insufficient balance
@@ -525,13 +529,12 @@ func (transactor Transactor) createTransactions() {
 				spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
 			}
 		}
-
+		txMutex.Unlock()
+		time.Sleep(1 * time.Second) // Sleep to rate limit transaction creation
 		// Consolidate outpoints
 		if len(lowDenomOutpoints) > 0 {
 			transactor.consolidateOutpoints(lowDenomOutpoints)
 		}
-		txMutex.Unlock()
-		time.Sleep(1 * time.Second) // Sleep to rate limit transaction creation
 	}
 }
 
@@ -546,7 +549,7 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 	ins := make([]types.TxIn, 0)
 	outs := make([]types.TxOut, 0)
 
-	consolidateDemonIndex := 14
+	consolidateDemonIndex := MIN_DENOMINATION + 2 // Consolidate 10 .01 to .1 Qi
 
 	newOutpoint := types.TxOut{
 		Denomination: uint8(consolidateDemonIndex),
@@ -556,7 +559,6 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 
 	addresses := make(map[string]struct{})
 	fmt.Println("Consolidating outpoints", len(lowDenomOutpoints))
-	fmt.Println("to address", toAddressStr)
 	for _, consolidateItem := range lowDenomOutpoints {
 		address := consolidateItem.address
 		// Skip the address that we are consolidating to
@@ -574,13 +576,14 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 
 		if len(ins) == 10 {
 			// Send consolidated transaction
-			fmt.Println("Sending consolidated transaction", len(ins), len(outs), len(privKeys), len(pubKeys))
+			// fmt.Println("Sending consolidated transaction", len(ins), len(outs), len(privKeys), len(pubKeys))
 			transactor.makeUTXOTransaction(ins, outs, privKeys, pubKeys)
 			// Reset
-			privKeys = make([]*secp256k1.PrivateKey, 0)
-			pubKeys = make([]*secp256k1.PublicKey, 0)
-			ins = make([]types.TxIn, 0)
-			addresses = make(map[string]struct{})
+			// privKeys = make([]*secp256k1.PrivateKey, 0)
+			// pubKeys = make([]*secp256k1.PublicKey, 0)
+			// ins = make([]types.TxIn, 0)
+			// addresses = make(map[string]struct{})
+			return
 		}
 		time.Sleep(1 * time.Second) // Sleep to rate limit transaction creation
 	}
