@@ -83,8 +83,9 @@ type blockInfo struct {
 }
 
 type ConsolidatedOutpoint struct {
-	newInput types.TxIn
-	address  string
+	newInput     types.TxIn
+	address      string
+	denomination uint8
 }
 
 var txTotal = 0
@@ -452,7 +453,13 @@ func (transactor Transactor) createTransactions() {
 
 		lowDenomOutpoints := make([]ConsolidatedOutpoint, 0)
 
+		count := 0
 		for address, outpoints := range spendableOutpoints {
+			// count to let the block listener process
+			if count > 50 {
+				break
+			}
+			count++
 			if len(outpoints) == 0 || addressMap[address].PrivateKey == nil {
 				continue // Skip if no outpoints or no private key
 			}
@@ -483,28 +490,31 @@ func (transactor Transactor) createTransactions() {
 					continue
 				}
 
-				if selectedOutpoint.txOut.Denomination == MIN_DENOMINATION {
+				if selectedOutpoint.txOut.Denomination <= MIN_DENOMINATION {
 					consolidateItem := ConsolidatedOutpoint{
-						newInput: in,
-						address:  address,
+						newInput:     in,
+						address:      address,
+						denomination: selectedOutpoint.txOut.Denomination,
 					}
 
 					lowDenomOutpoints = append(lowDenomOutpoints, consolidateItem)
-					if len(lowDenomOutpoints) > 10 {
+
+					// have enough low denomination outpoints, break out of loop
+					if len(lowDenomOutpoints) > 50 {
 						break
 					}
-
 					i--
 					continue
 				}
 
 				// Skip to account for 9 outputs with denominations, i.e 100000 to 10000 x 9
 				denomIndex := selectedOutpoint.txOut.Denomination - 2
-				if denomIndex == 0 {
-					fmt.Println("denomIndex is 0")
+				addressData := addressMap[toAddressStr]
+				if addressData.Balance == nil || types.Denominations[uint8(denomIndex)] == nil || denomIndex == 255 {
+					i--
 					continue
 				}
-				addressData := addressMap[toAddressStr]
+
 				if addressData.Balance.Cmp(types.Denominations[uint8(denomIndex)]) < 1 {
 					i-- // Try again if the address has insufficient balance
 					continue
@@ -551,6 +561,8 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 
 	consolidateDemonIndex := MIN_DENOMINATION + 2 // Consolidate 10 .01 to .1 Qi
 
+	consolidateAmount := types.Denominations[uint8(consolidateDemonIndex)]
+
 	newOutpoint := types.TxOut{
 		Denomination: uint8(consolidateDemonIndex),
 		Address:      toAddress.Bytes(),
@@ -559,6 +571,7 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 
 	addresses := make(map[string]struct{})
 	fmt.Println("Consolidating outpoints", len(lowDenomOutpoints))
+	consolidateTotal := big.NewInt(0)
 	for _, consolidateItem := range lowDenomOutpoints {
 		address := consolidateItem.address
 		// Skip the address that we are consolidating to
@@ -574,7 +587,7 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 		pubKeys = append(pubKeys, addressMap[address].PrivateKey.PubKey())
 		ins = append(ins, consolidateItem.newInput)
 
-		if len(ins) == 10 {
+		if consolidateTotal.Cmp(consolidateAmount) > 0 {
 			// Send consolidated transaction
 			// fmt.Println("Sending consolidated transaction", len(ins), len(outs), len(privKeys), len(pubKeys))
 			transactor.makeUTXOTransaction(ins, outs, privKeys, pubKeys)
@@ -585,6 +598,7 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 			// addresses = make(map[string]struct{})
 			return
 		}
+		consolidateTotal.Add(consolidateTotal, types.Denominations[uint8(consolidateItem.denomination)])
 		time.Sleep(1 * time.Second) // Sleep to rate limit transaction creation
 	}
 }
