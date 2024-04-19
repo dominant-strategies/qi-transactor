@@ -4,7 +4,7 @@ go 1.21.1
 
 toolchain go1.21.6
 
-replace github.com/dominant-strategies/go-quai => /Users/alan/code/go-quai
+replace github.com/dominant-strategies/go-quai => ../go-quai
 
 require (
 	github.com/btcsuite/btcd/btcec/v2 v2.3.2
