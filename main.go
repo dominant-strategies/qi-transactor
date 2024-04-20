@@ -282,14 +282,14 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 	// key = hash(blockHash, index)
 	// Find hash / index for originUtxo / imagine this is block hash
 
+	chainId := big.NewInt(chainId)
 	utxo := &types.QiTx{
-		ChainID: big.NewInt(chainId),
+		ChainID: chainId,
 		TxIn:    ins,
 		TxOut:   outs,
 	}
 
 	tx := types.NewTx(utxo)
-	chainId := big.NewInt(chainId)
 
 	if len(privKeys) != len(pubKeys) {
 		log.Fatal("Private keys and public keys must be the same length")
@@ -314,7 +314,7 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 	}
 
 	signedUtxo := &types.QiTx{
-		ChainID:   big.NewInt(1337),
+		ChainID:   chainId,
 		TxIn:      tx.TxIn(),
 		TxOut:     tx.TxOut(),
 		Signature: sig,
