@@ -373,6 +373,7 @@ func (transactor Transactor) listenForNewBlocks() {
 			log.Fatal(err)
 		case header := <-headers:
 			hashMutex.Lock()
+			fmt.Println("New Work Object: ", header)
 			if (header == &types.WorkObject{}) {
 				hashMutex.Unlock()
 				continue
