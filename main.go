@@ -33,6 +33,8 @@ var (
 	genAllocPath string
 	selectedZone string
 	chainId      int64
+	keysFile     string
+	group        string
 )
 
 type AddressInfo struct {
@@ -100,6 +102,8 @@ func main() {
 	// Define a string flag to capture the zone input
 	zoneFlag := flag.String("zone", "", "Zone flag to set the wsUrl and location (e.g., zone-0-0, zone-0-1, ... zone-2-2)")
 	chainIdFlag := flag.Int64("chainId", 1337, "ChainId flag (e.g., 1337)")
+	keysFileFlag := flag.String("file", "gen_alloc_qi_keys.json", "File flag to set the genAllocPath (e.g., gen_alloc_qi_keys.json)")
+	groupFlag := flag.String("group", "group-0", "Group flag to set the group (e.g., group-0, group-1, ... group-2)")
 
 	// Parse the flags
 	flag.Parse()
@@ -149,6 +153,8 @@ func main() {
 
 	selectedZone = *zoneFlag
 	chainId = *chainIdFlag
+	keysFile = *keysFileFlag
+	group = *groupFlag
 
 	// Initialize maps
 	addressMap = make(map[string]AddressData)
@@ -165,7 +171,7 @@ func main() {
 	}
 
 	// Load addresses and private keys from JSON file
-	err = transactor.loadAddresses("gen_alloc_qi_keys.json", "group-0")
+	err = transactor.loadAddresses(keysFile, group)
 	if err != nil {
 		log.Fatalf("Error loading addresses: %v", err)
 	}
@@ -367,6 +373,10 @@ func (transactor Transactor) listenForNewBlocks() {
 			log.Fatal(err)
 		case header := <-headers:
 			hashMutex.Lock()
+			if (header == &types.WorkObject{}) {
+				hashMutex.Unlock()
+				continue
+			}
 			headerHashes = append(headerHashes, header.Hash())
 
 			time.Sleep(1 * time.Second)
