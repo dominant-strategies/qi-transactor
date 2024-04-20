@@ -32,6 +32,7 @@ var (
 	location     common.Location
 	genAllocPath string
 	selectedZone string
+	chainId      int64
 )
 
 type AddressInfo struct {
@@ -98,6 +99,7 @@ type Transactor struct {
 func main() {
 	// Define a string flag to capture the zone input
 	zoneFlag := flag.String("zone", "", "Zone flag to set the wsUrl and location (e.g., zone-0-0, zone-0-1, ... zone-2-2)")
+	chainIdFlag := flag.Int64("chainId", 1337, "ChainId flag (e.g., 1337)")
 
 	// Parse the flags
 	flag.Parse()
@@ -105,39 +107,39 @@ func main() {
 	// Set wsUrl and location based on the zoneFlag
 	switch *zoneFlag {
 	case "zone-0-0":
-		wsUrl = "ws://127.0.0.1:8100"
+		wsUrl = "ws://127.0.0.1:8200"
 		location = common.Location{0, 0}
 		genAllocPath = "genallocs/gen_alloc_qi_cyprus1.json"
 	case "zone-0-1":
-		wsUrl = "ws://127.0.0.1:8101"
+		wsUrl = "ws://127.0.0.1:8201"
 		location = common.Location{0, 1}
 		genAllocPath = "genallocs/gen_alloc_qi_cyprus2.json"
 	case "zone-0-2":
-		wsUrl = "ws://127.0.0.1:8102"
+		wsUrl = "ws://127.0.0.1:8202"
 		location = common.Location{0, 2}
 		genAllocPath = "genallocs/gen_alloc_qi_cyprus3.json"
 	case "zone-1-0":
-		wsUrl = "ws://127.0.0.1:8120"
+		wsUrl = "ws://127.0.0.1:8220"
 		location = common.Location{1, 0}
 		genAllocPath = "genallocs/gen_alloc_qi_paxos1.json"
 	case "zone-1-1":
-		wsUrl = "ws://127.0.0.1:8121"
+		wsUrl = "ws://127.0.0.1:8221"
 		location = common.Location{1, 1}
 		genAllocPath = "genallocs/gen_alloc_qi_paxos2.json"
 	case "zone-1-2":
-		wsUrl = "ws://127.0.0.1:8122"
+		wsUrl = "ws://127.0.0.1:8222"
 		location = common.Location{1, 2}
 		genAllocPath = "genallocs/gen_alloc_qi_paxos3.json"
 	case "zone-2-0":
-		wsUrl = "ws://127.0.0.1:8140"
+		wsUrl = "ws://127.0.0.1:8240"
 		location = common.Location{2, 0}
 		genAllocPath = "genallocs/gen_alloc_qi_hydra1.json"
 	case "zone-2-1":
-		wsUrl = "ws://127.0.0.1:8141"
+		wsUrl = "ws://127.0.0.1:8241"
 		location = common.Location{2, 1}
 		genAllocPath = "genallocs/gen_alloc_qi_hydra2.json"
 	case "zone-2-2":
-		wsUrl = "ws://127.0.0.1:8142"
+		wsUrl = "ws://127.0.0.1:8242"
 		location = common.Location{2, 2}
 		genAllocPath = "genallocs/gen_alloc_qi_hydra3.json"
 	default:
@@ -146,6 +148,7 @@ func main() {
 	}
 
 	selectedZone = *zoneFlag
+	chainId = *chainIdFlag
 
 	// Initialize maps
 	addressMap = make(map[string]AddressData)
@@ -274,13 +277,13 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 	// Find hash / index for originUtxo / imagine this is block hash
 
 	utxo := &types.QiTx{
-		ChainID: big.NewInt(1337),
+		ChainID: big.NewInt(chainId),
 		TxIn:    ins,
 		TxOut:   outs,
 	}
 
 	tx := types.NewTx(utxo)
-	chainId := big.NewInt(1337)
+	chainId := big.NewInt(chainId)
 
 	if len(privKeys) != len(pubKeys) {
 		log.Fatal("Private keys and public keys must be the same length")
@@ -349,7 +352,7 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 // listenForNewBlocks listens for new blocks and processes them
 func (transactor Transactor) listenForNewBlocks() {
 	// Subscribe to new block headers
-	headers := make(chan *types.Header)
+	headers := make(chan *types.WorkObject)
 	sub, err := transactor.client.SubscribeNewHead(context.Background(), headers)
 	if err != nil {
 		log.Fatalf("Failed to subscribe to new headers: %v", err)
