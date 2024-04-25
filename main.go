@@ -399,12 +399,12 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 	}
 
 	// Display block information
-	fmt.Printf("number: %d txs: %d  hash: %s\n", block.Header().NumberArray(), len(block.Transactions()), block.Hash().Hex())
+	fmt.Printf("number: %d txs: %d  hash: %s\n", block.Header().NumberArray(), len(block.QiTransactions()), block.Hash().Hex())
 
 	// Calculate TPS based on block time
 	currentBlockInfo := blockInfo{
 		Time:             time.Unix(int64(block.Time()), 0),
-		TransactionCount: len(block.Transactions()),
+		TransactionCount: len(block.QiTransactions()),
 	}
 	blockInfos = append(blockInfos, currentBlockInfo)
 	if len(blockInfos) > maxBlocks {
@@ -429,7 +429,7 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 	txMutex.Lock()
 	defer txMutex.Unlock()
 
-	for _, tx := range block.Transactions()[1:] {
+	for _, tx := range block.QiTransactions()[1:] {
 		for i, txOut := range tx.TxOut() {
 			outpoint := &types.OutPoint{TxHash: tx.Hash(), Index: uint16(i)}
 			addressStr := "0x" + common.Bytes2Hex(txOut.Address)
@@ -470,7 +470,7 @@ func (transactor Transactor) createTransactions() {
 		count := 0
 		for address, outpoints := range spendableOutpoints {
 			// count to let the block listener process
-			if count > 300 {
+			if count > 20 {
 				break
 			}
 			count++
@@ -554,7 +554,7 @@ func (transactor Transactor) createTransactions() {
 			}
 		}
 		txMutex.Unlock()
-		time.Sleep(1 * time.Second) // Sleep to rate limit transaction creation
+		time.Sleep(10 * time.Second) // Sleep to rate limit transaction creation
 		// Consolidate outpoints
 		if len(lowDenomOutpoints) > 0 {
 			transactor.consolidateOutpoints(lowDenomOutpoints)
