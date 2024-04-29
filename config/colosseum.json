@@ -2,8 +2,9 @@
   "env": "colosseum",
   "blockTime": 12000,
   "machinesRunning": 4,
-  "targetTps": 2000,
+  "targetTps": 10,
   "increment": false,
   "etxFreq": 0.1,
-  "memPoolMax": 12000
+  "memPoolMax": 12000,
+  "startingSleepDuration": 3000
 }
