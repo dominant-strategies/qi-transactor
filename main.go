@@ -91,7 +91,6 @@ type ConsolidatedOutpoint struct {
 	denomination uint8
 }
 
-var txTotal = 0
 var MIN_DENOMINATION = uint8(2) // 2 for usual, 13 for testing
 
 type Transactor struct {
@@ -245,11 +244,11 @@ func (transactor Transactor) loadAddresses(filename, groupName string) error {
 
 	zoneData := group[selectedZone]
 
-	block, err := transactor.client.BlockByNumber(context.Background(), nil)
-	if err != nil {
-		log.Printf("Failed to get latest block: %v", err)
-		return err
-	}
+	// block, err := transactor.client.BlockByNumber(context.Background(), nil)
+	// if err != nil {
+	// 	log.Printf("Failed to get latest block: %v", err)
+	// 	return err
+	// }
 
 	for _, info := range zoneData {
 		privateKey, err := crypto.HexToECDSA(info.PrivateKey[2:]) // Remove '0x' prefix
@@ -262,20 +261,20 @@ func (transactor Transactor) loadAddresses(filename, groupName string) error {
 		secpKey := secp256k1.PrivKeyFromBytes(btcecKey.Serialize())
 
 		lowStrAddress := strings.ToLower(info.Address)
-		address := common.HexToAddress(info.Address, location)
-		mixedCase := common.NewMixedcaseAddress(address)
+		// address := common.HexToAddress(info.Address, location)
+		// mixedCase := common.NewMixedcaseAddress(address)
 
-		balance, err := transactor.client.BalanceAt(context.Background(), mixedCase, block.Number(2))
-		if err != nil {
-			log.Printf("Failed to get balance for address %s: %v", info.Address, err)
-			continue
-		}
+		// balance, err := transactor.client.BalanceAt(context.Background(), mixedCase, block.Number(2))
+		// if err != nil {
+		// 	log.Printf("Failed to get balance for address %s: %v", info.Address, err)
+		// 	continue
+		// }
 
-		fmt.Printf("Loading Address: %s, balance %d\n", lowStrAddress, balance)
+		// fmt.Printf("Loading Address: %s, balance %d\n", lowStrAddress, balance)
 
 		s := AddressData{
 			PrivateKey: secpKey,
-			Balance:    balance,
+			Balance:    big.NewInt(100000000),
 			Location:   location,
 		}
 		addressMap[lowStrAddress] = s
@@ -411,14 +410,12 @@ func (transactor Transactor) listenForNewBlocks() {
 			log.Fatal(err)
 		case header := <-headers:
 			hashMutex.Lock()
-			fmt.Println("New Work Object: ", header)
 			if (header == &types.WorkObject{}) {
 				hashMutex.Unlock()
 				continue
 			}
 			headerHashes = append(headerHashes, header.Hash())
-
-			time.Sleep(1 * time.Second)
+			time.Sleep(10 * time.Millisecond) // Sleep to rate limit block processing
 			transactor.getBlockAndTransactions(header.Hash())
 			hashMutex.Unlock()
 		}
@@ -437,7 +434,7 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 	}
 
 	// Display block information
-	fmt.Printf("number: %d txs: %d  hash: %s\n", block.Header().NumberArray(), len(block.QiTransactions()), block.Hash().Hex())
+	fmt.Printf("number: %d txs: %d  hash: %s\n", block.WorkObjectHeader().NumberU64(), len(block.QiTransactions()), block.Hash().Hex())
 
 	// Calculate TPS based on block time
 	currentBlockInfo := blockInfo{
@@ -459,7 +456,7 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 		}
 		if totalTime > 0 {
 			weightedTPS := float64(totalTransactions) / totalTime
-			fmt.Printf("Total Transactions: %d Weighted TPS (last %d blocks): %f\n", txTotal, len(blockInfos), weightedTPS)
+			fmt.Printf("Total Transactions: %d Weighted TPS (last %d blocks): %f\n", totalTransactions, len(blockInfos), weightedTPS)
 		}
 	}
 
@@ -483,15 +480,13 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 				// fmt.Printf("Receiving Address: %s, balance %d\n", addressStr, addressMap[addressStr].Balance)
 			}
 		}
-		txTotal += 1
 	}
 
-	// Useful print for debugging
-	// for address, outpoints := range spendableOutpoints {
-	// 	if len(outpoints) > 0 {
-	// 		fmt.Println("address", address, "current spendable outs", len(outpoints))
-	// 	}
-	// }
+	totalOuts := 0
+	for _, outpoints := range spendableOutpoints {
+		totalOuts += len(outpoints)
+	}
+	fmt.Println("Total outpoints: ", totalOuts)
 }
 
 // createTransactions creates a new transaction for each address with a private key
@@ -507,10 +502,7 @@ func (transactor Transactor) createTransactions() {
 
 		count := 0
 		for address, outpoints := range spendableOutpoints {
-			// count to let the block listener process
-			if count > 20 {
-				break
-			}
+
 			count++
 			if len(outpoints) == 0 || addressMap[address].PrivateKey == nil {
 				continue // Skip if no outpoints or no private key
@@ -592,7 +584,7 @@ func (transactor Transactor) createTransactions() {
 			}
 		}
 		txMutex.Unlock()
-		time.Sleep(10 * time.Second) // Sleep to rate limit transaction creation
+
 		// Consolidate outpoints
 		if len(lowDenomOutpoints) > 0 {
 			transactor.consolidateOutpoints(lowDenomOutpoints)
@@ -622,7 +614,6 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 	outs = append(outs, newOutpoint)
 
 	addresses := make(map[string]struct{})
-	fmt.Println("Consolidating outpoints", len(lowDenomOutpoints))
 	consolidateTotal := big.NewInt(0)
 	for _, consolidateItem := range lowDenomOutpoints {
 		address := consolidateItem.address
@@ -640,18 +631,10 @@ func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []Consolidat
 		ins = append(ins, consolidateItem.newInput)
 
 		if consolidateTotal.Cmp(consolidateAmount) > 0 {
-			// Send consolidated transaction
-			// fmt.Println("Sending consolidated transaction", len(ins), len(outs), len(privKeys), len(pubKeys))
 			transactor.makeUTXOTransaction(ins, outs, privKeys, pubKeys)
-			// Reset
-			// privKeys = make([]*secp256k1.PrivateKey, 0)
-			// pubKeys = make([]*secp256k1.PublicKey, 0)
-			// ins = make([]types.TxIn, 0)
-			// addresses = make(map[string]struct{})
 			return
 		}
 		consolidateTotal.Add(consolidateTotal, types.Denominations[uint8(consolidateItem.denomination)])
-		time.Sleep(1 * time.Second) // Sleep to rate limit transaction creation
 	}
 }
 
