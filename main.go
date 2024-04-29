@@ -94,18 +94,22 @@ type ConsolidatedOutpoint struct {
 var MIN_DENOMINATION = uint8(2) // 2 for usual, 13 for testing
 
 type Transactor struct {
-	client *ethclient.Client
-	config Config
+	client        *ethclient.Client
+	config        Config
+	weightedTPS   int
+	mutex         sync.Mutex
+	sleepDuration time.Duration
 }
 
 type Config struct {
-	Env             string  `json:"env"`
-	BlockTime       int     `json:"blockTime"`
-	MachinesRunning int     `json:"machinesRunning"`
-	TargetTps       int     `json:"targetTps"`
-	Increment       bool    `json:"increment"`
-	EtxFreq         float64 `json:"etxFreq"`
-	MemPoolMax      int     `json:"memPoolMax"`
+	Env                   string  `json:"env"`
+	BlockTime             int     `json:"blockTime"`
+	MachinesRunning       int     `json:"machinesRunning"`
+	TargetTps             int     `json:"targetTps"`
+	Increment             bool    `json:"increment"`
+	EtxFreq               float64 `json:"etxFreq"`
+	MemPoolMax            int     `json:"memPoolMax"`
+	StartingSleepDuration int     `json:"startingSleepDuration"`
 }
 
 func main() {
@@ -195,8 +199,9 @@ func main() {
 	defer wsClient.Close()
 
 	transactor := Transactor{
-		client: wsClient,
-		config: cfg,
+		client:        wsClient,
+		config:        cfg,
+		sleepDuration: time.Duration(cfg.StartingSleepDuration) * time.Millisecond,
 	}
 
 	// Load addresses and private keys from JSON file
@@ -211,7 +216,7 @@ func main() {
 	}
 
 	go transactor.listenForNewBlocks()
-	go transactor.createTransactions()
+	go transactor.processTransactions()
 
 	// Wait for an interrupt signal
 	quit := make(chan os.Signal, 1)
@@ -314,6 +319,317 @@ func (transactor Transactor) loadGenesisUtxos(filename string) error {
 	return nil
 }
 
+// createTransactions creates a new transaction for each address with a private key
+// on a continuous loop. Will pick up low denomination outpoints and schedule
+// for consolidation.
+func (transactor *Transactor) processTransactions() {
+	// Initial calculation of the interval
+	for {
+		transactor.createTransactions()
+
+		// Wait for the remainder of the interval before starting the next cycle
+		time.Sleep(transactor.sleepDuration)
+		transactor.calculateAndSetNewSleepDuration()
+	}
+}
+
+// listenForNewBlocks listens for new blocks and processes them
+func (transactor Transactor) listenForNewBlocks() {
+	// Subscribe to new block headers
+	headers := make(chan *types.WorkObject)
+	sub, err := transactor.client.SubscribeNewHead(context.Background(), headers)
+	if err != nil {
+		log.Fatalf("Failed to subscribe to new headers: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Listen for new blocks
+	fmt.Println("Listening for new blocks...")
+	for {
+		select {
+		case err := <-sub.Err():
+			log.Fatal(err)
+		case header := <-headers:
+			hashMutex.Lock()
+			if (header == &types.WorkObject{}) {
+				hashMutex.Unlock()
+				continue
+			}
+			headerHashes = append(headerHashes, header.Hash())
+			time.Sleep(10 * time.Millisecond) // Sleep to rate limit block processing
+			transactor.getBlockAndTransactions(header.Hash())
+			hashMutex.Unlock()
+		}
+	}
+}
+
+// getBlockAndTransactions listens for the block and transactions
+// after the block is received, it will process the transactions
+// and update the spendableOutpoints map
+func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
+	block, err := transactor.client.BlockByHash(context.Background(), hash)
+	if err != nil {
+		fmt.Printf("Failed to retrieve the block: %s %s\n", hash, err)
+		return
+	}
+
+	fmt.Printf("number: %d txs: %d  hash: %s\n", block.WorkObjectHeader().NumberU64(), len(block.QiTransactions()), block.Hash().Hex())
+
+	// Updating block information and calculating weighted TPS
+	transactor.updateBlockInfo(block)
+
+	// Process transactions and update maps
+	transactor.processBlockTransactions(block)
+}
+
+func (transactor *Transactor) updateBlockInfo(block *types.WorkObject) {
+	currentBlockInfo := blockInfo{
+		Time:             time.Unix(int64(block.Time()), 0),
+		TransactionCount: len(block.QiTransactions()),
+	}
+	blockInfos = append(blockInfos, currentBlockInfo)
+	if len(blockInfos) > maxBlocks {
+		blockInfos = blockInfos[1:]
+	}
+}
+
+func (transactor *Transactor) calculateAndSetNewSleepDuration() {
+	weightedTPS := calculateWeightedTPS()
+	newSleepDuration := transactor.calculateNewSleepDuration(weightedTPS, transactor.config.TargetTps)
+
+	transactor.mutex.Lock()
+	transactor.sleepDuration = newSleepDuration
+	transactor.mutex.Unlock()
+
+	fmt.Println("Updated sleep duration to", newSleepDuration)
+}
+
+func calculateWeightedTPS() float64 {
+	var totalTransactions int
+	var totalTime float64
+	for i := 1; i < len(blockInfos); i++ {
+		totalTransactions += blockInfos[i].TransactionCount
+		totalTime += blockInfos[i].Time.Sub(blockInfos[i-1].Time).Seconds()
+	}
+	if totalTime > 0 {
+		fmt.Printf("Total Transactions: %d Weighted TPS (last %d blocks): %f\n", totalTransactions, len(blockInfos), float64(totalTransactions)/totalTime)
+		return float64(totalTransactions) / totalTime
+	}
+	return 0
+}
+
+func (transactor *Transactor) processBlockTransactions(block *types.WorkObject) {
+	txMutex.Lock()
+	defer txMutex.Unlock()
+
+	for _, tx := range block.QiTransactions()[1:] {
+		for i, txOut := range tx.TxOut() {
+			outpoint := &types.OutPoint{TxHash: tx.Hash(), Index: uint16(i)}
+			addressStr := "0x" + common.Bytes2Hex(txOut.Address)
+
+			if _, exists := addressMap[addressStr]; exists {
+				outpointAndTxOut := OutpointAndTxOut{outpoint, &txOut}
+				spendableOutpoints[addressStr] = append(spendableOutpoints[addressStr], outpointAndTxOut)
+				addressMap[addressStr].Balance.Add(addressMap[addressStr].Balance, types.Denominations[txOut.Denomination])
+			}
+		}
+	}
+}
+
+func convertToSleepDuration(tps int) time.Duration {
+	if tps == 0 {
+		return time.Duration(0)
+	}
+	// Convert the result of the division to time.Duration explicitly
+	return time.Second / time.Duration(tps)
+}
+
+// calculateNewSleepDuration adjusts the transaction sending interval based on the current and target TPS.
+// weightedTPS: The current TPS calculated as a weighted average.
+// targetTPS: The TPS that the system aims to achieve.
+func (transactor *Transactor) calculateNewSleepDuration(weightedTPS float64, targetTPS int) time.Duration {
+	if targetTPS == 0 {
+		return time.Duration(transactor.config.StartingSleepDuration) * time.Millisecond
+	}
+
+	if weightedTPS == 0 {
+		return time.Duration(transactor.config.StartingSleepDuration) * time.Millisecond
+	}
+
+	// Calculate the ratio of current TPS to target TPS.
+	tpsRatio := weightedTPS / float64(targetTPS)
+
+	// Clamp the TPS ratio between 0.3 and 3.
+	if tpsRatio < 0.3 {
+		tpsRatio = 0.3
+	} else if tpsRatio > 3 {
+		tpsRatio = 3
+	}
+
+	// Adjust the current sleep duration based on the clamped ratio.
+	newSleepDuration := time.Duration(float64(transactor.sleepDuration) * tpsRatio)
+
+	return newSleepDuration
+}
+
+func (transactor Transactor) createTransactions() {
+	rand.Seed(time.Now().UnixNano()) // Seed the random number generator
+
+	txMutex.Lock()
+
+	lowDenomOutpoints := make([]ConsolidatedOutpoint, 0)
+
+	count := 0
+	for address, outpoints := range spendableOutpoints {
+
+		count++
+		if len(outpoints) == 0 || addressMap[address].PrivateKey == nil {
+			continue // Skip if no outpoints or no private key
+		}
+
+		selectedOutpoint := outpoints[0] // Simplified selection; adjust as needed
+		addresses := make(map[common.AddressBytes]struct{})
+
+		in := types.TxIn{
+			PreviousOutPoint: *types.NewOutPoint(&selectedOutpoint.outpoint.TxHash, selectedOutpoint.outpoint.Index),
+			PubKey:           addressMap[address].PrivateKey.PubKey().SerializeUncompressed(),
+		}
+
+		byteAddress := common.HexToAddress(address, location)
+		addresses[byteAddress.Bytes20()] = struct{}{}
+
+		numOuts := 9
+		if selectedOutpoint.txOut.Denomination < 13 {
+			numOuts = 2
+		}
+
+		outs := make([]types.TxOut, 0)
+		for i := 0; i < numOuts; i++ {
+			toAddressStr := getRandomAddress(addressMap)
+			toAddress := common.HexToAddress(toAddressStr, location)
+
+			if _, exists := addresses[toAddress.Bytes20()]; exists {
+				i-- // Try again if the address is already used
+				continue
+			}
+
+			if selectedOutpoint.txOut.Denomination <= MIN_DENOMINATION {
+				consolidateItem := ConsolidatedOutpoint{
+					newInput:     in,
+					address:      address,
+					denomination: selectedOutpoint.txOut.Denomination,
+				}
+
+				lowDenomOutpoints = append(lowDenomOutpoints, consolidateItem)
+
+				// have enough low denomination outpoints, break out of loop
+				if len(lowDenomOutpoints) > 50 {
+					break
+				}
+				i--
+				continue
+			}
+
+			// Skip to account for 9 outputs with denominations, i.e 100000 to 10000 x 9
+			denomIndex := selectedOutpoint.txOut.Denomination - 2
+			addressData := addressMap[toAddressStr]
+			if addressData.Balance == nil || types.Denominations[uint8(denomIndex)] == nil || denomIndex == 255 {
+				i--
+				continue
+			}
+
+			if addressData.Balance.Cmp(types.Denominations[uint8(denomIndex)]) < 1 {
+				i-- // Try again if the address has insufficient balance
+				continue
+			}
+
+			newOut := types.TxOut{
+				Denomination: uint8(denomIndex), // Simplified; adjust denomination as needed
+				Address:      toAddress.Bytes(),
+			}
+			outs = append(outs, newOut)
+
+			// Track the balance of added outpoints
+			addressMap[toAddressStr].Balance.Sub(addressMap[toAddressStr].Balance, types.Denominations[uint8(denomIndex)])
+			addresses[toAddress.Bytes20()] = struct{}{}
+		}
+
+		if len(outs) == numOuts {
+			privKeys := []*secp256k1.PrivateKey{addressMap[address].PrivateKey}
+			pubKeys := []*secp256k1.PublicKey{addressMap[address].PrivateKey.PubKey()}
+			transactor.makeUTXOTransaction([]types.TxIn{in}, outs, privKeys, pubKeys)
+
+			spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
+		}
+	}
+
+	// Consolidate outpoints
+	if len(lowDenomOutpoints) > 0 {
+		transactor.consolidateOutpoints(lowDenomOutpoints)
+	}
+
+	txMutex.Unlock()
+}
+
+// Consolidate outpoints with denominations less than MIN_DENOMINATION
+func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []ConsolidatedOutpoint) {
+	// Pick a random address to consolidate to
+	toAddressStr := getRandomAddress(addressMap)
+	toAddress := common.HexToAddress(toAddressStr, location)
+
+	privKeys := make([]*secp256k1.PrivateKey, 0)
+	pubKeys := make([]*secp256k1.PublicKey, 0)
+	ins := make([]types.TxIn, 0)
+	outs := make([]types.TxOut, 0)
+
+	consolidateDemonIndex := MIN_DENOMINATION + 2 // Consolidate 10 .01 to .1 Qi
+
+	consolidateAmount := types.Denominations[uint8(consolidateDemonIndex)]
+
+	newOutpoint := types.TxOut{
+		Denomination: uint8(consolidateDemonIndex),
+		Address:      toAddress.Bytes(),
+	}
+	outs = append(outs, newOutpoint)
+
+	addresses := make(map[string]struct{})
+	consolidateTotal := big.NewInt(0)
+	for _, consolidateItem := range lowDenomOutpoints {
+		address := consolidateItem.address
+		// Skip the address that we are consolidating to
+		if address == toAddressStr {
+			continue
+		}
+		if _, exists := addresses[address]; exists {
+			continue
+		}
+
+		addresses[address] = struct{}{}
+		privKeys = append(privKeys, addressMap[address].PrivateKey)
+		pubKeys = append(pubKeys, addressMap[address].PrivateKey.PubKey())
+		ins = append(ins, consolidateItem.newInput)
+
+		if consolidateTotal.Cmp(consolidateAmount) > 0 {
+			transactor.makeUTXOTransaction(ins, outs, privKeys, pubKeys)
+			return
+		}
+		consolidateTotal.Add(consolidateTotal, types.Denominations[uint8(consolidateItem.denomination)])
+	}
+}
+
+// Utility function to get a random address from addressMap, excluding the input address
+func getRandomAddress(addressMap map[string]AddressData) string {
+	keys := make([]string, 0, len(addressMap))
+	for k := range addressMap {
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return "" // Handle case where addressMap is empty
+	}
+	randIndex := rand.Intn(len(keys))
+	return keys[randIndex]
+}
+
 // Create a transaction for a given input and output set
 func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.TxOut, privKeys []*secp256k1.PrivateKey, pubKeys []*secp256k1.PublicKey) *types.Transaction {
 	// key = hash(blockHash, index)
@@ -390,265 +706,6 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 	}
 
 	return tx
-}
-
-// listenForNewBlocks listens for new blocks and processes them
-func (transactor Transactor) listenForNewBlocks() {
-	// Subscribe to new block headers
-	headers := make(chan *types.WorkObject)
-	sub, err := transactor.client.SubscribeNewHead(context.Background(), headers)
-	if err != nil {
-		log.Fatalf("Failed to subscribe to new headers: %v", err)
-	}
-	defer sub.Unsubscribe()
-
-	// Listen for new blocks
-	fmt.Println("Listening for new blocks...")
-	for {
-		select {
-		case err := <-sub.Err():
-			log.Fatal(err)
-		case header := <-headers:
-			hashMutex.Lock()
-			if (header == &types.WorkObject{}) {
-				hashMutex.Unlock()
-				continue
-			}
-			headerHashes = append(headerHashes, header.Hash())
-			time.Sleep(10 * time.Millisecond) // Sleep to rate limit block processing
-			transactor.getBlockAndTransactions(header.Hash())
-			hashMutex.Unlock()
-		}
-	}
-}
-
-// getBlockAndTransactions listens for the block and transactions
-// after the block is received, it will process the transactions
-// and update the spendableOutpoints map
-func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
-	// Retrieve the block by its hash
-	block, err := transactor.client.BlockByHash(context.Background(), hash)
-	if err != nil {
-		fmt.Printf("Failed to retrieve the block: %s %s\n", hash, err)
-		return
-	}
-
-	// Display block information
-	fmt.Printf("number: %d txs: %d  hash: %s\n", block.WorkObjectHeader().NumberU64(), len(block.QiTransactions()), block.Hash().Hex())
-
-	// Calculate TPS based on block time
-	currentBlockInfo := blockInfo{
-		Time:             time.Unix(int64(block.Time()), 0),
-		TransactionCount: len(block.QiTransactions()),
-	}
-	blockInfos = append(blockInfos, currentBlockInfo)
-	if len(blockInfos) > maxBlocks {
-		blockInfos = blockInfos[1:] // Keep only the last 100 blocks
-	}
-
-	// Calculate weighted TPS
-	if len(blockInfos) > 1 {
-		var totalTransactions int
-		var totalTime float64
-		for i := 1; i < len(blockInfos); i++ {
-			totalTransactions += blockInfos[i].TransactionCount
-			totalTime += blockInfos[i].Time.Sub(blockInfos[i-1].Time).Seconds()
-		}
-		if totalTime > 0 {
-			weightedTPS := float64(totalTransactions) / totalTime
-			fmt.Printf("Total Transactions: %d Weighted TPS (last %d blocks): %f\n", totalTransactions, len(blockInfos), weightedTPS)
-		}
-	}
-
-	// Iterate over and display transactions in the block
-	txMutex.Lock()
-	defer txMutex.Unlock()
-
-	for _, tx := range block.QiTransactions()[1:] {
-		for i, txOut := range tx.TxOut() {
-			outpoint := &types.OutPoint{TxHash: tx.Hash(), Index: uint16(i)}
-			addressStr := "0x" + common.Bytes2Hex(txOut.Address)
-
-			// Check if the address is one of the loaded addresses with a private key
-			if _, exists := addressMap[addressStr]; exists {
-				outpointAndTxOut := OutpointAndTxOut{outpoint, &txOut}
-				// Append the outpoint to the spendableOutpoints map for the address
-				spendableOutpoints[addressStr] = append(spendableOutpoints[addressStr], outpointAndTxOut)
-
-				// Track the balance of added outpoints
-				addressMap[addressStr].Balance.Add(addressMap[addressStr].Balance, types.Denominations[txOut.Denomination])
-				// fmt.Printf("Receiving Address: %s, balance %d\n", addressStr, addressMap[addressStr].Balance)
-			}
-		}
-	}
-
-	totalOuts := 0
-	for _, outpoints := range spendableOutpoints {
-		totalOuts += len(outpoints)
-	}
-	fmt.Println("Total outpoints: ", totalOuts)
-}
-
-// createTransactions creates a new transaction for each address with a private key
-// on a continuous loop. Will pick up low denomination outpoints and schedule
-// for consolidation.
-func (transactor Transactor) createTransactions() {
-	rand.Seed(time.Now().UnixNano()) // Seed the random number generator
-
-	for {
-		txMutex.Lock()
-
-		lowDenomOutpoints := make([]ConsolidatedOutpoint, 0)
-
-		count := 0
-		for address, outpoints := range spendableOutpoints {
-
-			count++
-			if len(outpoints) == 0 || addressMap[address].PrivateKey == nil {
-				continue // Skip if no outpoints or no private key
-			}
-
-			selectedOutpoint := outpoints[0] // Simplified selection; adjust as needed
-			addresses := make(map[common.AddressBytes]struct{})
-
-			in := types.TxIn{
-				PreviousOutPoint: *types.NewOutPoint(&selectedOutpoint.outpoint.TxHash, selectedOutpoint.outpoint.Index),
-				PubKey:           addressMap[address].PrivateKey.PubKey().SerializeUncompressed(),
-			}
-
-			byteAddress := common.HexToAddress(address, location)
-			addresses[byteAddress.Bytes20()] = struct{}{}
-
-			numOuts := 9
-			if selectedOutpoint.txOut.Denomination < 13 {
-				numOuts = 2
-			}
-
-			outs := make([]types.TxOut, 0)
-			for i := 0; i < numOuts; i++ {
-				toAddressStr := getRandomAddress(addressMap)
-				toAddress := common.HexToAddress(toAddressStr, location)
-
-				if _, exists := addresses[toAddress.Bytes20()]; exists {
-					i-- // Try again if the address is already used
-					continue
-				}
-
-				if selectedOutpoint.txOut.Denomination <= MIN_DENOMINATION {
-					consolidateItem := ConsolidatedOutpoint{
-						newInput:     in,
-						address:      address,
-						denomination: selectedOutpoint.txOut.Denomination,
-					}
-
-					lowDenomOutpoints = append(lowDenomOutpoints, consolidateItem)
-
-					// have enough low denomination outpoints, break out of loop
-					if len(lowDenomOutpoints) > 50 {
-						break
-					}
-					i--
-					continue
-				}
-
-				// Skip to account for 9 outputs with denominations, i.e 100000 to 10000 x 9
-				denomIndex := selectedOutpoint.txOut.Denomination - 2
-				addressData := addressMap[toAddressStr]
-				if addressData.Balance == nil || types.Denominations[uint8(denomIndex)] == nil || denomIndex == 255 {
-					i--
-					continue
-				}
-
-				if addressData.Balance.Cmp(types.Denominations[uint8(denomIndex)]) < 1 {
-					i-- // Try again if the address has insufficient balance
-					continue
-				}
-
-				newOut := types.TxOut{
-					Denomination: uint8(denomIndex), // Simplified; adjust denomination as needed
-					Address:      toAddress.Bytes(),
-				}
-				outs = append(outs, newOut)
-
-				// Track the balance of added outpoints
-				addressMap[toAddressStr].Balance.Sub(addressMap[toAddressStr].Balance, types.Denominations[uint8(denomIndex)])
-				addresses[toAddress.Bytes20()] = struct{}{}
-			}
-
-			if len(outs) == numOuts {
-				privKeys := []*secp256k1.PrivateKey{addressMap[address].PrivateKey}
-				pubKeys := []*secp256k1.PublicKey{addressMap[address].PrivateKey.PubKey()}
-				transactor.makeUTXOTransaction([]types.TxIn{in}, outs, privKeys, pubKeys)
-
-				spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
-			}
-		}
-		txMutex.Unlock()
-
-		// Consolidate outpoints
-		if len(lowDenomOutpoints) > 0 {
-			transactor.consolidateOutpoints(lowDenomOutpoints)
-		}
-	}
-}
-
-// Consolidate outpoints with denominations less than MIN_DENOMINATION
-func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []ConsolidatedOutpoint) {
-	// Pick a random address to consolidate to
-	toAddressStr := getRandomAddress(addressMap)
-	toAddress := common.HexToAddress(toAddressStr, location)
-
-	privKeys := make([]*secp256k1.PrivateKey, 0)
-	pubKeys := make([]*secp256k1.PublicKey, 0)
-	ins := make([]types.TxIn, 0)
-	outs := make([]types.TxOut, 0)
-
-	consolidateDemonIndex := MIN_DENOMINATION + 2 // Consolidate 10 .01 to .1 Qi
-
-	consolidateAmount := types.Denominations[uint8(consolidateDemonIndex)]
-
-	newOutpoint := types.TxOut{
-		Denomination: uint8(consolidateDemonIndex),
-		Address:      toAddress.Bytes(),
-	}
-	outs = append(outs, newOutpoint)
-
-	addresses := make(map[string]struct{})
-	consolidateTotal := big.NewInt(0)
-	for _, consolidateItem := range lowDenomOutpoints {
-		address := consolidateItem.address
-		// Skip the address that we are consolidating to
-		if address == toAddressStr {
-			continue
-		}
-		if _, exists := addresses[address]; exists {
-			continue
-		}
-
-		addresses[address] = struct{}{}
-		privKeys = append(privKeys, addressMap[address].PrivateKey)
-		pubKeys = append(pubKeys, addressMap[address].PrivateKey.PubKey())
-		ins = append(ins, consolidateItem.newInput)
-
-		if consolidateTotal.Cmp(consolidateAmount) > 0 {
-			transactor.makeUTXOTransaction(ins, outs, privKeys, pubKeys)
-			return
-		}
-		consolidateTotal.Add(consolidateTotal, types.Denominations[uint8(consolidateItem.denomination)])
-	}
-}
-
-// Utility function to get a random address from addressMap, excluding the input address
-func getRandomAddress(addressMap map[string]AddressData) string {
-	keys := make([]string, 0, len(addressMap))
-	for k := range addressMap {
-		keys = append(keys, k)
-	}
-	if len(keys) == 0 {
-		return "" // Handle case where addressMap is empty
-	}
-	randIndex := rand.Intn(len(keys))
-	return keys[randIndex]
 }
 
 func getAggSig(privKeys []*secp256k1.PrivateKey, pubKeys []*secp256k1.PublicKey, txHash [32]byte) (*schnorr.Signature, error) {
