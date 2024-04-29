@@ -1,0 +1,9 @@
+{
+  "env": "colosseum",
+  "blockTime": 12000,
+  "machinesRunning": 4,
+  "targetTps": 2000,
+  "increment": false,
+  "etxFreq": 0.1,
+  "memPoolMax": 12000
+}

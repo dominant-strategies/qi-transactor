@@ -96,9 +96,38 @@ var MIN_DENOMINATION = uint8(2) // 2 for usual, 13 for testing
 
 type Transactor struct {
 	client *ethclient.Client
+	config Config
+}
+
+type Config struct {
+	Env             string  `json:"env"`
+	BlockTime       int     `json:"blockTime"`
+	MachinesRunning int     `json:"machinesRunning"`
+	TargetTps       int     `json:"targetTps"`
+	Increment       bool    `json:"increment"`
+	EtxFreq         float64 `json:"etxFreq"`
+	MemPoolMax      int     `json:"memPoolMax"`
 }
 
 func main() {
+	var cfg Config
+
+	// Read JSON config file
+	data, err := ioutil.ReadFile("config/colosseum.json")
+	if err != nil {
+		log.Fatalf("Error when opening file: %v", err)
+	}
+
+	// Unmarshal JSON data
+	err = json.Unmarshal(data, &cfg)
+	if err != nil {
+		log.Fatalf("Error during Unmarshal(): %v", err)
+	}
+
+	// Now you can use cfg to access the configuration
+	fmt.Printf("Environment: %s\n", cfg.Env)
+	fmt.Printf("Block Time: %dms\n", cfg.BlockTime)
+
 	// Define a string flag to capture the zone input
 	zoneFlag := flag.String("zone", "", "Zone flag to set the wsUrl and location (e.g., zone-0-0, zone-0-1, ... zone-2-2)")
 	chainIdFlag := flag.Int64("chain", 1337, "ChainId flag (e.g., 1337)")
@@ -168,6 +197,7 @@ func main() {
 
 	transactor := Transactor{
 		client: wsClient,
+		config: cfg,
 	}
 
 	// Load addresses and private keys from JSON file
@@ -214,26 +244,34 @@ func (transactor Transactor) loadAddresses(filename, groupName string) error {
 	defer txMutex.Unlock()
 
 	zoneData := group[selectedZone]
+
+	block, err := transactor.client.BlockByNumber(context.Background(), nil)
+	if err != nil {
+		log.Printf("Failed to get latest block: %v", err)
+		return err
+	}
+
 	for _, info := range zoneData {
 		privateKey, err := crypto.HexToECDSA(info.PrivateKey[2:]) // Remove '0x' prefix
 		if err != nil {
 			log.Printf("Invalid private key for address %s: %v", info.Address, err)
 			continue
 		}
+
 		btcecKey, _ := btcec.PrivKeyFromBytes(privateKey.D.Bytes())
 		secpKey := secp256k1.PrivKeyFromBytes(btcecKey.Serialize())
 
 		lowStrAddress := strings.ToLower(info.Address)
-		// address := common.HexToAddress(info.Address, location)
+		address := common.HexToAddress(info.Address, location)
+		mixedCase := common.NewMixedcaseAddress(address)
 
-		// balance, err := transactor.client.QiBalance(context.Background(), address)
-		// if err != nil {
-		// 	log.Printf("Failed to get balance for address %s: %v", info.Address, err)
-		// 	continue
-		// }
+		balance, err := transactor.client.BalanceAt(context.Background(), mixedCase, block.Number(2))
+		if err != nil {
+			log.Printf("Failed to get balance for address %s: %v", info.Address, err)
+			continue
+		}
 
-		balance := big.NewInt(100000000)
-		// fmt.Printf("Loading Address: %s, balance %d\n", lowStrAddress, balance)
+		fmt.Printf("Loading Address: %s, balance %d\n", lowStrAddress, balance)
 
 		s := AddressData{
 			PrivateKey: secpKey,
