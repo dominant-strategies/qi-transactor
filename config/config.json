@@ -1,0 +1,17 @@
+{
+"env": "garden",
+"blockTime": 7000,
+"machinesRunning": 6,
+"txs": {
+    "tps": {
+      "target": 2000,
+      "increment": {
+        "enabled": false
+      }
+    },
+    "etxFreq": 0.1
+  },
+"memPool": {
+    "max": 12000
+  }
+}

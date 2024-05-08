@@ -25,6 +25,7 @@ import (
 	"github.com/dominant-strategies/go-quai/core/types"
 	"github.com/dominant-strategies/go-quai/crypto"
 	"github.com/dominant-strategies/go-quai/quaiclient/ethclient"
+	"github.com/spf13/viper"
 )
 
 var (
@@ -94,8 +95,9 @@ type ConsolidatedOutpoint struct {
 var MIN_DENOMINATION = uint8(2) // 2 for usual, 13 for testing
 
 type Transactor struct {
-	client *ethclient.Client
-	config Config
+	client     *ethclient.Client
+	config     Config
+	CurrentTPS float64
 }
 
 type Config struct {
@@ -111,17 +113,20 @@ type Config struct {
 func main() {
 	var cfg Config
 
-	// Read JSON config file
-	data, err := ioutil.ReadFile("config/colosseum.json")
-	if err != nil {
-		log.Fatalf("Error when opening file: %v", err)
+	viper.SetConfigName("config")
+	viper.SetConfigType("json")
+	viper.AddConfigPath("./config/")
+	err := viper.ReadInConfig() // Find and read the config file
+	if err != nil {             // Handle errors reading the config file
+		panic(fmt.Errorf("fatal error config file: %w", err))
 	}
-
-	// Unmarshal JSON data
-	err = json.Unmarshal(data, &cfg)
-	if err != nil {
-		log.Fatalf("Error during Unmarshal(): %v", err)
-	}
+	cfg.Env = viper.GetString("env")
+	cfg.BlockTime = viper.GetInt("blockTime")
+	cfg.MachinesRunning = viper.GetInt("machinesRunning")
+	cfg.TargetTps = viper.GetInt("txs.tps.target")
+	cfg.Increment = viper.GetBool("txs.tps.increment.enabled")
+	cfg.EtxFreq = viper.GetFloat64("txs.etxFreq")
+	cfg.MemPoolMax = viper.GetInt("mempool.max")
 
 	// Now you can use cfg to access the configuration
 	fmt.Printf("Environment: %s\n", cfg.Env)
@@ -223,7 +228,7 @@ func main() {
 }
 
 // Load addresses and private keys from a specified group in the JSON file
-func (transactor Transactor) loadAddresses(filename, groupName string) error {
+func (transactor *Transactor) loadAddresses(filename, groupName string) error {
 	data, err := ioutil.ReadFile(filename)
 	if err != nil {
 		return err
@@ -286,7 +291,7 @@ func (transactor Transactor) loadAddresses(filename, groupName string) error {
 }
 
 // loadGenesisUtxos loads genesis UTXOs from a specified file
-func (transactor Transactor) loadGenesisUtxos(filename string) error {
+func (transactor *Transactor) loadGenesisUtxos(filename string) error {
 	file, err := ioutil.ReadFile(filename)
 	if err != nil {
 		return fmt.Errorf("error reading file: %v", err)
@@ -315,7 +320,7 @@ func (transactor Transactor) loadGenesisUtxos(filename string) error {
 }
 
 // Create a transaction for a given input and output set
-func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.TxOut, privKeys []*secp256k1.PrivateKey, pubKeys []*secp256k1.PublicKey) *types.Transaction {
+func (transactor *Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.TxOut, privKeys []*secp256k1.PrivateKey, pubKeys []*secp256k1.PublicKey) *types.Transaction {
 	// key = hash(blockHash, index)
 	// Find hash / index for originUtxo / imagine this is block hash
 
@@ -393,7 +398,7 @@ func (transactor Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.
 }
 
 // listenForNewBlocks listens for new blocks and processes them
-func (transactor Transactor) listenForNewBlocks() {
+func (transactor *Transactor) listenForNewBlocks() {
 	// Subscribe to new block headers
 	headers := make(chan *types.WorkObject)
 	sub, err := transactor.client.SubscribeNewHead(context.Background(), headers)
@@ -425,7 +430,7 @@ func (transactor Transactor) listenForNewBlocks() {
 // getBlockAndTransactions listens for the block and transactions
 // after the block is received, it will process the transactions
 // and update the spendableOutpoints map
-func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
+func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 	// Retrieve the block by its hash
 	block, err := transactor.client.BlockByHash(context.Background(), hash)
 	if err != nil {
@@ -457,6 +462,7 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 		if totalTime > 0 {
 			weightedTPS := float64(totalTransactions) / totalTime
 			fmt.Printf("Total Transactions: %d Weighted TPS (last %d blocks): %f\n", totalTransactions, len(blockInfos), weightedTPS)
+			transactor.CurrentTPS = weightedTPS
 		}
 	}
 
@@ -492,9 +498,14 @@ func (transactor Transactor) getBlockAndTransactions(hash common.Hash) {
 // createTransactions creates a new transaction for each address with a private key
 // on a continuous loop. Will pick up low denomination outpoints and schedule
 // for consolidation.
-func (transactor Transactor) createTransactions() {
+func (transactor *Transactor) createTransactions() {
 	rand.Seed(time.Now().UnixNano()) // Seed the random number generator
-
+	numTxs := 0
+	startTime := time.Now()
+	// assume it takes 10 ms to construct a transaction
+	txCreationTime := time.Duration(10) * time.Millisecond
+	tpsPerMachine := transactor.config.TargetTps / transactor.config.MachinesRunning
+	targetSleepTime := (time.Second / time.Duration(tpsPerMachine)) - txCreationTime
 	for {
 		txMutex.Lock()
 
@@ -579,12 +590,24 @@ func (transactor Transactor) createTransactions() {
 				privKeys := []*secp256k1.PrivateKey{addressMap[address].PrivateKey}
 				pubKeys := []*secp256k1.PublicKey{addressMap[address].PrivateKey.PubKey()}
 				transactor.makeUTXOTransaction([]types.TxIn{in}, outs, privKeys, pubKeys)
-
+				numTxs++
 				spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
 			}
 		}
 		txMutex.Unlock()
 
+		// Adjust the sleep time every 1k transactions
+		if numTxs%1000 == 0 && time.Since(startTime).Minutes() > 5 {
+			// Check if the current TPS is within 10% of the target TPS
+			if transactor.CurrentTPS < float64(transactor.config.TargetTps) && float64(transactor.config.TargetTps)-transactor.CurrentTPS > float64(transactor.config.TargetTps)*0.10 {
+				// Decrease the sleep time by 5%
+				targetSleepTime = targetSleepTime - (targetSleepTime * 5 / 100)
+			} else if transactor.CurrentTPS > float64(tpsPerMachine) && transactor.CurrentTPS-float64(transactor.config.TargetTps) > float64(transactor.config.TargetTps)*0.10 {
+				// Increase the sleep time by 5%
+				targetSleepTime = targetSleepTime + (targetSleepTime * 5 / 100)
+			}
+		}
+		time.Sleep(targetSleepTime)
 		// Consolidate outpoints
 		if len(lowDenomOutpoints) > 0 {
 			transactor.consolidateOutpoints(lowDenomOutpoints)
@@ -593,7 +616,7 @@ func (transactor Transactor) createTransactions() {
 }
 
 // Consolidate outpoints with denominations less than MIN_DENOMINATION
-func (transactor Transactor) consolidateOutpoints(lowDenomOutpoints []ConsolidatedOutpoint) {
+func (transactor *Transactor) consolidateOutpoints(lowDenomOutpoints []ConsolidatedOutpoint) {
 	// Pick a random address to consolidate to
 	toAddressStr := getRandomAddress(addressMap)
 	toAddress := common.HexToAddress(toAddressStr, location)
