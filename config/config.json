@@ -9,7 +9,7 @@
         "enabled": false
       }
     },
-    "etxFreq": 0.1
+    "etxFreq": 0
   },
 "memPool": {
     "max": 12000
