@@ -4,7 +4,7 @@
 "machinesRunning": 6,
 "txs": {
     "tps": {
-      "target": 2000,
+      "target": 500,
       "increment": {
         "enabled": false
       }
