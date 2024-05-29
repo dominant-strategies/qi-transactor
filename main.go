@@ -10,7 +10,6 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,6 +23,7 @@ import (
 	"github.com/dominant-strategies/go-quai/common"
 	"github.com/dominant-strategies/go-quai/core/types"
 	"github.com/dominant-strategies/go-quai/crypto"
+	"github.com/dominant-strategies/go-quai/params"
 	"github.com/dominant-strategies/go-quai/quaiclient/ethclient"
 	"github.com/spf13/viper"
 )
@@ -33,6 +33,7 @@ var (
 	location     common.Location
 	genAllocPath string
 	selectedZone string
+	etxZone      string
 	chainId      int64
 	keysFile     string
 	group        string
@@ -57,8 +58,10 @@ type AddressData struct {
 }
 
 var (
-	addressMap         map[string]AddressData        // Map address to balance and location
-	spendableOutpoints map[string][]OutpointAndTxOut // Map address to spendable outpoints
+	addressMap         map[common.AddressBytes]AddressData        // Map address to balance and location
+	etxAddresses       []common.AddressBytes                      // Map address to balance and location
+	spendableOutpoints map[common.AddressBytes][]OutpointAndTxOut // Map address to spendable outpoints
+	lowDenomOutpoints  map[common.AddressBytes][]OutpointAndTxOut
 	txMutex            sync.Mutex
 )
 
@@ -73,12 +76,11 @@ type OutpointAndTxOut struct {
 	txOut    *types.TxOut
 }
 
-const maxBlocks = 100
+const maxBlocks = 50
 
 var (
 	headerHashes []common.Hash
-	hashMutex    sync.Mutex
-	blockInfos   []blockInfo // Slice to store information about the last 100 blocks
+	blockInfos   []blockInfo // Slice to store information about the last 50 blocks
 )
 
 type blockInfo struct {
@@ -88,7 +90,7 @@ type blockInfo struct {
 
 type ConsolidatedOutpoint struct {
 	newInput     types.TxIn
-	address      string
+	address      common.AddressBytes
 	denomination uint8
 }
 
@@ -107,6 +109,8 @@ type Config struct {
 	TargetTps       int     `json:"targetTps"`
 	Increment       bool    `json:"increment"`
 	EtxFreq         float64 `json:"etxFreq"`
+	Kp              float64 `json:"kp"` // proportional gain for P controller
+	Ki              float64 `json:"ki"` // integral gain for PI controller
 	MemPoolMax      int     `json:"memPoolMax"`
 }
 
@@ -126,7 +130,13 @@ func main() {
 	cfg.TargetTps = viper.GetInt("txs.tps.target")
 	cfg.Increment = viper.GetBool("txs.tps.increment.enabled")
 	cfg.EtxFreq = viper.GetFloat64("txs.etxFreq")
+	if cfg.EtxFreq > 0.5 {
+		fmt.Println("EtxFreq must be less than or equal to 0.5, setting to 0.5")
+		cfg.EtxFreq = 0.5
+	}
 	cfg.MemPoolMax = viper.GetInt("mempool.max")
+	cfg.Kp = viper.GetFloat64("kp")
+	cfg.Ki = viper.GetFloat64("ki")
 
 	// Now you can use cfg to access the configuration
 	fmt.Printf("Environment: %s\n", cfg.Env)
@@ -147,38 +157,47 @@ func main() {
 		wsUrl = "ws://127.0.0.1:8200"
 		location = common.Location{0, 0}
 		genAllocPath = "genallocs/gen_alloc_qi_cyprus1.json"
+		etxZone = "zone-0-1"
 	case "zone-0-1":
 		wsUrl = "ws://127.0.0.1:8201"
 		location = common.Location{0, 1}
 		genAllocPath = "genallocs/gen_alloc_qi_cyprus2.json"
+		etxZone = "zone-0-2"
 	case "zone-0-2":
 		wsUrl = "ws://127.0.0.1:8202"
 		location = common.Location{0, 2}
 		genAllocPath = "genallocs/gen_alloc_qi_cyprus3.json"
+		etxZone = "zone-1-0"
 	case "zone-1-0":
 		wsUrl = "ws://127.0.0.1:8220"
 		location = common.Location{1, 0}
 		genAllocPath = "genallocs/gen_alloc_qi_paxos1.json"
+		etxZone = "zone-1-1"
 	case "zone-1-1":
 		wsUrl = "ws://127.0.0.1:8221"
 		location = common.Location{1, 1}
 		genAllocPath = "genallocs/gen_alloc_qi_paxos2.json"
+		etxZone = "zone-1-2"
 	case "zone-1-2":
 		wsUrl = "ws://127.0.0.1:8222"
 		location = common.Location{1, 2}
 		genAllocPath = "genallocs/gen_alloc_qi_paxos3.json"
+		etxZone = "zone-2-0"
 	case "zone-2-0":
 		wsUrl = "ws://127.0.0.1:8240"
 		location = common.Location{2, 0}
 		genAllocPath = "genallocs/gen_alloc_qi_hydra1.json"
+		etxZone = "zone-2-1"
 	case "zone-2-1":
 		wsUrl = "ws://127.0.0.1:8241"
 		location = common.Location{2, 1}
 		genAllocPath = "genallocs/gen_alloc_qi_hydra2.json"
+		etxZone = "zone-2-2"
 	case "zone-2-2":
 		wsUrl = "ws://127.0.0.1:8242"
 		location = common.Location{2, 2}
 		genAllocPath = "genallocs/gen_alloc_qi_hydra3.json"
+		etxZone = "zone-0-0"
 	default:
 		// Handle default case or invalid zone
 		log.Fatalf("Invalid or no zone specified")
@@ -190,9 +209,10 @@ func main() {
 	group = *groupFlag
 
 	// Initialize maps
-	addressMap = make(map[string]AddressData)
-	spendableOutpoints = make(map[string][]OutpointAndTxOut)
-
+	addressMap = make(map[common.AddressBytes]AddressData)
+	etxAddresses = make([]common.AddressBytes, 0)
+	spendableOutpoints = make(map[common.AddressBytes][]OutpointAndTxOut)
+	lowDenomOutpoints = make(map[common.AddressBytes][]OutpointAndTxOut)
 	wsClient, err := ethclient.Dial(wsUrl)
 	if err != nil {
 		log.Fatalf("Failed to connect to the Ethereum WebSocket client: %v", err)
@@ -261,11 +281,21 @@ func (transactor *Transactor) loadAddresses(filename, groupName string) error {
 			log.Printf("Invalid private key for address %s: %v", info.Address, err)
 			continue
 		}
-
+		if privateKey == nil {
+			log.Printf("Invalid private key for address %s", info.Address)
+			continue
+		}
 		btcecKey, _ := btcec.PrivKeyFromBytes(privateKey.D.Bytes())
+		if btcecKey == nil {
+			log.Printf("Failed to convert private key for address %s", info.Address)
+			continue
+		}
 		secpKey := secp256k1.PrivKeyFromBytes(btcecKey.Serialize())
+		if secpKey == nil {
+			log.Printf("Failed to convert private key to secpKey for address %s", info.Address)
+			continue
+		}
 
-		lowStrAddress := strings.ToLower(info.Address)
 		// address := common.HexToAddress(info.Address, location)
 		// mixedCase := common.NewMixedcaseAddress(address)
 
@@ -282,9 +312,13 @@ func (transactor *Transactor) loadAddresses(filename, groupName string) error {
 			Balance:    big.NewInt(100000000),
 			Location:   location,
 		}
-		addressMap[lowStrAddress] = s
+		addressMap[common.HexToAddressBytes(info.Address)] = s
 		// Initialize spendableOutpoints map for this address
-		spendableOutpoints[lowStrAddress] = make([]OutpointAndTxOut, 0)
+		spendableOutpoints[common.HexToAddressBytes(info.Address)] = make([]OutpointAndTxOut, 0)
+	}
+
+	for _, info := range group[etxZone] {
+		etxAddresses = append(etxAddresses, common.HexToAddressBytes(info.Address))
 	}
 
 	return nil
@@ -305,13 +339,12 @@ func (transactor *Transactor) loadGenesisUtxos(filename string) error {
 	for address, utxo := range utxos {
 		hash := common.HexToHash(utxo.Hash)
 		outpoint := &types.OutPoint{TxHash: hash, Index: uint16(utxo.Index)}
-		lowStrAddr := strings.ToLower(address)
-		addr := common.Hex2Bytes(lowStrAddr)
+		addr := common.Hex2Bytes(address)
 		txOut := &types.TxOut{
 			Address:      addr,
 			Denomination: uint8(utxo.Denomination),
 		}
-		spendableOutpoints[lowStrAddr] = append(spendableOutpoints[lowStrAddr], OutpointAndTxOut{
+		spendableOutpoints[common.HexToAddressBytes(address)] = append(spendableOutpoints[common.HexToAddressBytes(address)], OutpointAndTxOut{
 			outpoint: outpoint,
 			txOut:    txOut,
 		})
@@ -400,7 +433,7 @@ func (transactor *Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types
 // listenForNewBlocks listens for new blocks and processes them
 func (transactor *Transactor) listenForNewBlocks() {
 	// Subscribe to new block headers
-	headers := make(chan *types.WorkObject)
+	headers := make(chan *types.WorkObject, 10000)
 	sub, err := transactor.client.SubscribeNewHead(context.Background(), headers)
 	if err != nil {
 		log.Fatalf("Failed to subscribe to new headers: %v", err)
@@ -414,18 +447,17 @@ func (transactor *Transactor) listenForNewBlocks() {
 		case err := <-sub.Err():
 			log.Fatal(err)
 		case header := <-headers:
-			hashMutex.Lock()
 			if (header == &types.WorkObject{}) {
-				hashMutex.Unlock()
 				continue
 			}
 			headerHashes = append(headerHashes, header.Hash())
 			time.Sleep(10 * time.Millisecond) // Sleep to rate limit block processing
 			transactor.getBlockAndTransactions(header.Hash())
-			hashMutex.Unlock()
 		}
 	}
 }
+
+var totalTransactions int
 
 // getBlockAndTransactions listens for the block and transactions
 // after the block is received, it will process the transactions
@@ -448,19 +480,19 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 	}
 	blockInfos = append(blockInfos, currentBlockInfo)
 	if len(blockInfos) > maxBlocks {
-		blockInfos = blockInfos[1:] // Keep only the last 100 blocks
+		blockInfos = blockInfos[1:] // Keep only the last 50 blocks
 	}
-
+	totalTransactions += currentBlockInfo.TransactionCount
 	// Calculate weighted TPS
-	if len(blockInfos) > 1 {
-		var totalTransactions int
+	if len(blockInfos) >= maxBlocks {
+		var transactions int
 		var totalTime float64
 		for i := 1; i < len(blockInfos); i++ {
-			totalTransactions += blockInfos[i].TransactionCount
+			transactions += blockInfos[i].TransactionCount
 			totalTime += blockInfos[i].Time.Sub(blockInfos[i-1].Time).Seconds()
 		}
 		if totalTime > 0 {
-			weightedTPS := float64(totalTransactions) / totalTime
+			weightedTPS := float64(transactions) / totalTime
 			fmt.Printf("Total Transactions: %d Weighted TPS (last %d blocks): %f\n", totalTransactions, len(blockInfos), weightedTPS)
 			transactor.CurrentTPS = weightedTPS
 		}
@@ -470,29 +502,33 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 	txMutex.Lock()
 	defer txMutex.Unlock()
 
-	for _, tx := range block.QiTransactions()[1:] {
+	for _, tx := range block.QiTransactions() {
 		for i, txOut := range tx.TxOut() {
 			outpoint := &types.OutPoint{TxHash: tx.Hash(), Index: uint16(i)}
 			addressStr := "0x" + common.Bytes2Hex(txOut.Address)
-
+			addr := common.HexToAddressBytes(addressStr)
 			// Check if the address is one of the loaded addresses with a private key
-			if _, exists := addressMap[addressStr]; exists {
+			if _, exists := addressMap[addr]; exists {
 				outpointAndTxOut := OutpointAndTxOut{outpoint, &txOut}
 				// Append the outpoint to the spendableOutpoints map for the address
-				spendableOutpoints[addressStr] = append(spendableOutpoints[addressStr], outpointAndTxOut)
+				spendableOutpoints[addr] = append(spendableOutpoints[addr], outpointAndTxOut)
 
 				// Track the balance of added outpoints
-				addressMap[addressStr].Balance.Add(addressMap[addressStr].Balance, types.Denominations[txOut.Denomination])
+				addressMap[addr].Balance.Add(addressMap[addr].Balance, types.Denominations[txOut.Denomination])
 				// fmt.Printf("Receiving Address: %s, balance %d\n", addressStr, addressMap[addressStr].Balance)
 			}
 		}
 	}
 
 	totalOuts := 0
+	totalLowDenomOutpoints := 0
 	for _, outpoints := range spendableOutpoints {
 		totalOuts += len(outpoints)
 	}
-	fmt.Println("Total outpoints: ", totalOuts)
+	for _, outpoints := range lowDenomOutpoints {
+		totalLowDenomOutpoints += len(outpoints)
+	}
+	fmt.Printf("Total outpoints: %d LowDenomOutpoints: %d\n", totalOuts, totalLowDenomOutpoints)
 }
 
 // createTransactions creates a new transaction for each address with a private key
@@ -501,25 +537,71 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 func (transactor *Transactor) createTransactions() {
 	rand.Seed(time.Now().UnixNano()) // Seed the random number generator
 	numTxs := 0
+	numEtxs := 0
 	startTime := time.Now()
-	// assume it takes 10 ms to construct a transaction
-	txCreationTime := time.Duration(10) * time.Millisecond
+	txTime := time.Now()
+	integral := 0.0
+	// assume it takes 3 ms to construct a transaction
+	txCreationTime := time.Duration(3) * time.Millisecond
+	totalTxCreationTime := time.Duration(0)
 	tpsPerMachine := transactor.config.TargetTps / transactor.config.MachinesRunning
 	targetSleepTime := (time.Second / time.Duration(tpsPerMachine)) - txCreationTime
+	if targetSleepTime < 0 {
+		targetSleepTime = 0
+	}
+
 	for {
-		txMutex.Lock()
 
-		lowDenomOutpoints := make([]ConsolidatedOutpoint, 0)
-
-		count := 0
+		prevNumTxs := numTxs
+		txMutex.Lock() // lock to read the spendableOutpoints map
 		for address, outpoints := range spendableOutpoints {
-
-			count++
+			txMutex.Unlock()
+			txCreationStart := time.Now()
+			txMutex.Lock()
 			if len(outpoints) == 0 || addressMap[address].PrivateKey == nil {
+				// Don't unlock here because it's unlocked in the next iteration
 				continue // Skip if no outpoints or no private key
 			}
+			i := 0
+			selectedOutpoint := outpoints[i]                              // Select first output
+			for selectedOutpoint.txOut.Denomination <= MIN_DENOMINATION { // Skip low denomination outpoints
+				lowDenoms := lowDenomOutpoints[address]
+				if lowDenoms == nil {
+					lowDenomOutpoints[address] = make([]OutpointAndTxOut, 0)
+				} else if Contains(&lowDenoms, selectedOutpoint) {
+					// Skip if the outpoint is already in the lowDenomOutpoints list
+					if i >= len(outpoints)-1 {
+						break
+					}
+					i++
+					selectedOutpoint = outpoints[i]
+					continue
+				}
+				lowDenomOutpoints[address] = append(lowDenomOutpoints[address], selectedOutpoint)
+				if i >= len(outpoints)-1 {
+					break
+				}
+				i++
+				selectedOutpoint = outpoints[i]
+			}
+			if selectedOutpoint.txOut.Denomination <= MIN_DENOMINATION {
+				// This address does not have any spendable outpoints
+				continue
+			}
+			maxOutputs := new(big.Int).Div(types.Denominations[selectedOutpoint.txOut.Denomination], types.Denominations[selectedOutpoint.txOut.Denomination-1]).Uint64()
+			numOuts := 3
+			if selectedOutpoint.txOut.Denomination < 10 || uint64(numOuts) >= maxOutputs {
+				numOuts = int(maxOutputs - 1)
+			}
+			if numTxs%20 == 0 && selectedOutpoint.txOut.Denomination > 0 {
+				numOuts = int(maxOutputs) - 1
+			}
 
-			selectedOutpoint := outpoints[0] // Simplified selection; adjust as needed
+			denomIndex := selectedOutpoint.txOut.Denomination - 1
+			if selectedOutpoint.txOut.Denomination == 0 {
+				denomIndex = 0
+			}
+
 			addresses := make(map[common.AddressBytes]struct{})
 
 			in := types.TxIn{
@@ -527,150 +609,112 @@ func (transactor *Transactor) createTransactions() {
 				PubKey:           addressMap[address].PrivateKey.PubKey().SerializeUncompressed(),
 			}
 
-			byteAddress := common.HexToAddress(address, location)
-			addresses[byteAddress.Bytes20()] = struct{}{}
-
-			numOuts := 9
-			if selectedOutpoint.txOut.Denomination < 13 {
-				numOuts = 2
+			privKeys := []*secp256k1.PrivateKey{addressMap[address].PrivateKey}
+			pubKeys := []*secp256k1.PublicKey{addressMap[address].PrivateKey.PubKey()}
+			inputs := []types.TxIn{in}
+			//foundFeeInput := true
+			// Add a single low denomination outpoint to the transaction for fee
+			for address, outpoints := range lowDenomOutpoints {
+				if len(outpoints) == 0 || addressMap[address].PrivateKey == nil {
+					continue // Skip if no outpoints or no private key
+				}
+				lowDenomOutPoint := outpoints[0]
+				inputs = append(inputs, types.TxIn{
+					PreviousOutPoint: *types.NewOutPoint(&lowDenomOutPoint.outpoint.TxHash, lowDenomOutPoint.outpoint.Index),
+					PubKey:           addressMap[address].PrivateKey.PubKey().SerializeUncompressed(),
+				})
+				privKeys = append(privKeys, addressMap[address].PrivateKey)
+				pubKeys = append(pubKeys, addressMap[address].PrivateKey.PubKey())
+				addresses[address] = struct{}{}
+				lowDenomOutpoints[address] = lowDenomOutpoints[address][1:] // Remove the first outpoint used
+				if IntrinsicFee(uint64(len(inputs)), uint64(numOuts)).Cmp(types.Denominations[lowDenomOutPoint.txOut.Denomination]) == 1 {
+					//foundFeeInput = true
+					denomIndex = selectedOutpoint.txOut.Denomination
+					break
+				}
 			}
+			addresses[address] = struct{}{}
 
 			outs := make([]types.TxOut, 0)
 			for i := 0; i < numOuts; i++ {
-				toAddressStr := getRandomAddress(addressMap)
-				toAddress := common.HexToAddress(toAddressStr, location)
-
-				if _, exists := addresses[toAddress.Bytes20()]; exists {
+				etx := false
+				if transactor.config.EtxFreq > 0 && numTxs%(int(1/transactor.config.EtxFreq)) == 0 && i == 0 {
+					etx = true
+				}
+				toAddress := getRandomAddress(addressMap, etx)
+				if !toAddress.Location().Equal(location) {
+					numEtxs++
+				}
+				if _, exists := addresses[toAddress]; exists {
 					i-- // Try again if the address is already used
 					continue
 				}
 
-				if selectedOutpoint.txOut.Denomination <= MIN_DENOMINATION {
-					consolidateItem := ConsolidatedOutpoint{
-						newInput:     in,
-						address:      address,
-						denomination: selectedOutpoint.txOut.Denomination,
-					}
-
-					lowDenomOutpoints = append(lowDenomOutpoints, consolidateItem)
-
-					// have enough low denomination outpoints, break out of loop
-					if len(lowDenomOutpoints) > 50 {
-						break
-					}
-					i--
-					continue
-				}
-
-				// Skip to account for 9 outputs with denominations, i.e 100000 to 10000 x 9
-				denomIndex := selectedOutpoint.txOut.Denomination - 2
-				addressData := addressMap[toAddressStr]
-				if addressData.Balance == nil || types.Denominations[uint8(denomIndex)] == nil || denomIndex == 255 {
-					i--
-					continue
-				}
-
-				if addressData.Balance.Cmp(types.Denominations[uint8(denomIndex)]) < 1 {
-					i-- // Try again if the address has insufficient balance
-					continue
-				}
-
 				newOut := types.TxOut{
-					Denomination: uint8(denomIndex), // Simplified; adjust denomination as needed
-					Address:      toAddress.Bytes(),
+					Denomination: uint8(denomIndex),
+					Address:      toAddress[:],
 				}
 				outs = append(outs, newOut)
 
 				// Track the balance of added outpoints
-				addressMap[toAddressStr].Balance.Sub(addressMap[toAddressStr].Balance, types.Denominations[uint8(denomIndex)])
-				addresses[toAddress.Bytes20()] = struct{}{}
+				if !etx {
+					addressMap[toAddress].Balance.Add(addressMap[toAddress].Balance, types.Denominations[uint8(denomIndex)])
+				}
+				addresses[toAddress] = struct{}{}
 			}
-
-			if len(outs) == numOuts {
-				privKeys := []*secp256k1.PrivateKey{addressMap[address].PrivateKey}
-				pubKeys := []*secp256k1.PublicKey{addressMap[address].PrivateKey.PubKey()}
-				transactor.makeUTXOTransaction([]types.TxIn{in}, outs, privKeys, pubKeys)
-				numTxs++
-				spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
+			//fmt.Println("Creating transaction for address: ", address, " with ", len(outs), " outputs")
+			spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
+			txMutex.Unlock()
+			transactor.makeUTXOTransaction(inputs, outs, privKeys, pubKeys)
+			totalTxCreationTime += time.Since(txCreationStart)
+			time.Sleep(targetSleepTime)
+			numTxs++
+			// Adjust the sleep time every 5 seconds
+			// Adjust sleep time using PI controller
+			if time.Since(txTime) > time.Second*5 && time.Since(startTime) > time.Minute {
+				totalAverageTps := (float64(numTxs) / float64(time.Since(startTime).Seconds()))
+				calculatedError := float64(transactor.config.TargetTps)/float64(transactor.config.MachinesRunning) - totalAverageTps
+				Error := ((float64(transactor.config.TargetTps) - transactor.CurrentTPS) + calculatedError) / 2
+				integral += (Error / 1000) * float64(time.Since(txTime).Milliseconds())
+				txTime = time.Now()
+				fmt.Printf("Error: %f BlockTps: %f TotalAverageCalcTps: %f Etxs: %d Integral: %f\n", Error, transactor.CurrentTPS, totalAverageTps, numEtxs, transactor.config.Ki*integral)
+				fmt.Printf("Previous sleep time: %s\n", targetSleepTime)
+				targetSleepTime = targetSleepTime - time.Duration(transactor.config.Kp*Error*1e9) + time.Duration(transactor.config.Ki*integral*1e6) // 1e9 converts seconds to nanoseconds and 1e6 converts milliseconds to nanoseconds
+				fmt.Printf("New sleep time: %s\n", targetSleepTime)
+				// Avoid negative or excessively long sleep times
+				if targetSleepTime < 0 {
+					targetSleepTime = 0
+				} else if targetSleepTime > time.Second {
+					targetSleepTime = time.Second
+				}
 			}
+			txMutex.Lock() // Lock for reading the next iteration
 		}
 		txMutex.Unlock()
-
-		// Adjust the sleep time every 1k transactions
-		if numTxs%1000 == 0 && time.Since(startTime).Minutes() > 5 {
-			// Check if the current TPS is within 10% of the target TPS
-			if transactor.CurrentTPS < float64(transactor.config.TargetTps) && float64(transactor.config.TargetTps)-transactor.CurrentTPS > float64(transactor.config.TargetTps)*0.10 {
-				// Decrease the sleep time by 5%
-				targetSleepTime = targetSleepTime - (targetSleepTime * 5 / 100)
-			} else if transactor.CurrentTPS > float64(tpsPerMachine) && transactor.CurrentTPS-float64(transactor.config.TargetTps) > float64(transactor.config.TargetTps)*0.10 {
-				// Increase the sleep time by 5%
-				targetSleepTime = targetSleepTime + (targetSleepTime * 5 / 100)
-			}
-		}
-		time.Sleep(targetSleepTime)
-		// Consolidate outpoints
-		if len(lowDenomOutpoints) > 0 {
-			transactor.consolidateOutpoints(lowDenomOutpoints)
+		if prevNumTxs == numTxs {
+			fmt.Println("No spendable outpoints available.")
 		}
 	}
-}
 
-// Consolidate outpoints with denominations less than MIN_DENOMINATION
-func (transactor *Transactor) consolidateOutpoints(lowDenomOutpoints []ConsolidatedOutpoint) {
-	// Pick a random address to consolidate to
-	toAddressStr := getRandomAddress(addressMap)
-	toAddress := common.HexToAddress(toAddressStr, location)
-
-	privKeys := make([]*secp256k1.PrivateKey, 0)
-	pubKeys := make([]*secp256k1.PublicKey, 0)
-	ins := make([]types.TxIn, 0)
-	outs := make([]types.TxOut, 0)
-
-	consolidateDemonIndex := MIN_DENOMINATION + 2 // Consolidate 10 .01 to .1 Qi
-
-	consolidateAmount := types.Denominations[uint8(consolidateDemonIndex)]
-
-	newOutpoint := types.TxOut{
-		Denomination: uint8(consolidateDemonIndex),
-		Address:      toAddress.Bytes(),
-	}
-	outs = append(outs, newOutpoint)
-
-	addresses := make(map[string]struct{})
-	consolidateTotal := big.NewInt(0)
-	for _, consolidateItem := range lowDenomOutpoints {
-		address := consolidateItem.address
-		// Skip the address that we are consolidating to
-		if address == toAddressStr {
-			continue
-		}
-		if _, exists := addresses[address]; exists {
-			continue
-		}
-
-		addresses[address] = struct{}{}
-		privKeys = append(privKeys, addressMap[address].PrivateKey)
-		pubKeys = append(pubKeys, addressMap[address].PrivateKey.PubKey())
-		ins = append(ins, consolidateItem.newInput)
-
-		if consolidateTotal.Cmp(consolidateAmount) > 0 {
-			transactor.makeUTXOTransaction(ins, outs, privKeys, pubKeys)
-			return
-		}
-		consolidateTotal.Add(consolidateTotal, types.Denominations[uint8(consolidateItem.denomination)])
-	}
 }
 
 // Utility function to get a random address from addressMap, excluding the input address
-func getRandomAddress(addressMap map[string]AddressData) string {
-	keys := make([]string, 0, len(addressMap))
+func getRandomAddress(addressMap map[common.AddressBytes]AddressData, etx bool) common.AddressBytes {
+	keys := make([]common.AddressBytes, 0, len(addressMap))
 	for k := range addressMap {
 		keys = append(keys, k)
 	}
 	if len(keys) == 0 {
-		return "" // Handle case where addressMap is empty
+		return common.AddressBytes{} // Handle case where addressMap is empty
 	}
 	randIndex := rand.Intn(len(keys))
+	if etx {
+		randIndex = rand.Intn(len(etxAddresses))
+		return etxAddresses[randIndex]
+	}
+	if addressMap[keys[randIndex]].PrivateKey == nil {
+		return getRandomAddress(addressMap, etx) // Try again if the address has no private key
+	}
 	return keys[randIndex]
 }
 
@@ -783,4 +827,17 @@ func getAggSig(privKeys []*secp256k1.PrivateKey, pubKeys []*secp256k1.PublicKey,
 	}
 
 	return finalSig, nil
+}
+
+func Contains(outpoints *[]OutpointAndTxOut, outpoint OutpointAndTxOut) bool {
+	for _, o := range *outpoints {
+		if o.outpoint.TxHash == outpoint.outpoint.TxHash && o.outpoint.Index == outpoint.outpoint.Index {
+			return true
+		}
+	}
+	return false
+}
+
+func IntrinsicFee(txIns, txOuts uint64) *big.Int {
+	return new(big.Int).Mul(big.NewInt(params.GWei), new(big.Int).SetUint64(uint64(txIns*params.SloadGas+txOuts*params.CallValueTransferGas+params.EcrecoverGas)))
 }
