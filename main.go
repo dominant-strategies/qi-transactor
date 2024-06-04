@@ -30,7 +30,7 @@ import (
 
 var (
 	wsUrl        string
-	location     common.Location
+	location     = common.Location{0, 0}
 	genAllocPath string
 	selectedZone string
 	etxZone      string
@@ -112,6 +112,7 @@ type Config struct {
 	Kp              float64 `json:"kp"` // proportional gain for P controller
 	Ki              float64 `json:"ki"` // integral gain for PI controller
 	MemPoolMax      int     `json:"memPoolMax"`
+	MaxOutputsFreq  float64 `json:"maxOutputsFreq"`
 }
 
 func main() {
@@ -137,7 +138,11 @@ func main() {
 	cfg.MemPoolMax = viper.GetInt("mempool.max")
 	cfg.Kp = viper.GetFloat64("kp")
 	cfg.Ki = viper.GetFloat64("ki")
-
+	cfg.MaxOutputsFreq = viper.GetFloat64("txs.maxOutputsFreq")
+	if cfg.MaxOutputsFreq > 0.5 {
+		fmt.Println("MaxOutputsFreq must be less than or equal to 0.5, setting to 0.5")
+		cfg.MaxOutputsFreq = 0.5
+	}
 	// Now you can use cfg to access the configuration
 	fmt.Printf("Environment: %s\n", cfg.Env)
 	fmt.Printf("Block Time: %dms\n", cfg.BlockTime)
@@ -157,7 +162,7 @@ func main() {
 		wsUrl = "ws://127.0.0.1:8200"
 		location = common.Location{0, 0}
 		genAllocPath = "genallocs/gen_alloc_qi_cyprus1.json"
-		etxZone = "zone-0-1"
+		etxZone = "zone-1-0"
 	case "zone-0-1":
 		wsUrl = "ws://127.0.0.1:8201"
 		location = common.Location{0, 1}
@@ -519,6 +524,9 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 			}
 		}
 	}
+	/*for _, tx := range block.Body().ExternalTransactions() {
+
+	}*/
 
 	totalOuts := 0
 	totalLowDenomOutpoints := 0
@@ -549,7 +557,7 @@ func (transactor *Transactor) createTransactions() {
 	if targetSleepTime < 0 {
 		targetSleepTime = 0
 	}
-
+	toAddresses := make(map[string]uint)
 	for {
 
 		prevNumTxs := numTxs
@@ -593,7 +601,7 @@ func (transactor *Transactor) createTransactions() {
 			if selectedOutpoint.txOut.Denomination < 10 || uint64(numOuts) >= maxOutputs {
 				numOuts = int(maxOutputs - 1)
 			}
-			if numTxs%20 == 0 && selectedOutpoint.txOut.Denomination > 0 {
+			if numTxs%int(1/transactor.config.MaxOutputsFreq) == 0 && selectedOutpoint.txOut.Denomination > 0 {
 				numOuts = int(maxOutputs) - 1
 			}
 
@@ -630,6 +638,7 @@ func (transactor *Transactor) createTransactions() {
 				if IntrinsicFee(uint64(len(inputs)), uint64(numOuts)).Cmp(types.Denominations[lowDenomOutPoint.txOut.Denomination]) == 1 {
 					//foundFeeInput = true
 					denomIndex = selectedOutpoint.txOut.Denomination
+					numOuts = 1
 					break
 				}
 			}
@@ -645,6 +654,7 @@ func (transactor *Transactor) createTransactions() {
 				if !toAddress.Location().Equal(location) {
 					numEtxs++
 				}
+				toAddresses[toAddress.Location().Name()]++
 				if _, exists := addresses[toAddress]; exists {
 					i-- // Try again if the address is already used
 					continue
@@ -681,6 +691,9 @@ func (transactor *Transactor) createTransactions() {
 				fmt.Printf("Previous sleep time: %s\n", targetSleepTime)
 				targetSleepTime = targetSleepTime - time.Duration(transactor.config.Kp*Error*1e9) + time.Duration(transactor.config.Ki*integral*1e6) // 1e9 converts seconds to nanoseconds and 1e6 converts milliseconds to nanoseconds
 				fmt.Printf("New sleep time: %s\n", targetSleepTime)
+				for k, v := range toAddresses {
+					fmt.Printf("Location: %s, Count: %d\n", k, v)
+				}
 				// Avoid negative or excessively long sleep times
 				if targetSleepTime < 0 {
 					targetSleepTime = 0

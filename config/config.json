@@ -4,12 +4,13 @@
 "machinesRunning": 1,
 "txs": {
     "tps": {
-      "target": 50,
+      "target": 5,
       "increment": {
         "enabled": false
       }
     },
-    "etxFreq": 0.5
+    "etxFreq": 0.5,
+    "maxOutputsFreq": 0.2
   },
 "memPool": {
     "max": 12000
