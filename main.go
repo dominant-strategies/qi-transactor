@@ -524,9 +524,20 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 			}
 		}
 	}
-	/*for _, tx := range block.Body().ExternalTransactions() {
-
-	}*/
+	for _, tx := range block.Body().ExternalTransactions() {
+		if tx.To().IsInQiLedgerScope() {
+			if tx.ETXSender().Location().Equal(*tx.To().Location()) {
+				// Quai->Qi conversion, utxo is locked
+				continue
+			}
+			outpoint := &types.OutPoint{TxHash: tx.OriginatingTxHash(), Index: tx.ETXIndex()}
+			if _, exists := addressMap[tx.To().Bytes20()]; exists {
+				outpointAndTxOut := OutpointAndTxOut{outpoint, types.NewTxOut(uint8(tx.Value().Uint64()), tx.To().Bytes(), big.NewInt(0))}
+				spendableOutpoints[tx.To().Bytes20()] = append(spendableOutpoints[tx.To().Bytes20()], outpointAndTxOut)
+				addressMap[tx.To().Bytes20()].Balance.Add(addressMap[tx.To().Bytes20()].Balance, types.Denominations[uint8(tx.Value().Uint64())])
+			}
+		}
+	}
 
 	totalOuts := 0
 	totalLowDenomOutpoints := 0
