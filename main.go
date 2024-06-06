@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -349,6 +350,9 @@ func (transactor *Transactor) loadGenesisUtxos(filename string) error {
 			Address:      addr,
 			Denomination: uint8(utxo.Denomination),
 		}
+		if addressMap[common.HexToAddressBytes(address)].PrivateKey == nil {
+			continue
+		}
 		spendableOutpoints[common.HexToAddressBytes(address)] = append(spendableOutpoints[common.HexToAddressBytes(address)], OutpointAndTxOut{
 			outpoint: outpoint,
 			txOut:    txOut,
@@ -471,8 +475,18 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 	// Retrieve the block by its hash
 	block, err := transactor.client.BlockByHash(context.Background(), hash)
 	if err != nil {
-		fmt.Printf("Failed to retrieve the block: %s %s\n", hash, err)
-		return
+		if strings.Contains(err.Error(), "not found") {
+			time.Sleep(100 * time.Millisecond) // wait for block to be stored
+			block, err = transactor.client.BlockByHash(context.Background(), hash)
+			if err != nil {
+				fmt.Printf("Failed to retrieve the block after trying twice: %s %s\n", hash, err)
+				return
+			}
+		} else {
+			fmt.Printf("Failed to retrieve the block: %s %s\n", hash, err)
+			return
+		}
+
 	}
 
 	// Display block information
@@ -577,9 +591,13 @@ func (transactor *Transactor) createTransactions() {
 			txMutex.Unlock()
 			txCreationStart := time.Now()
 			txMutex.Lock()
-			if len(outpoints) == 0 || addressMap[address].PrivateKey == nil {
+			if len(outpoints) == 0 {
 				// Don't unlock here because it's unlocked in the next iteration
 				continue // Skip if no outpoints or no private key
+			}
+			if addressMap[address].PrivateKey == nil {
+				fmt.Printf("No private key for address: %s\n", address)
+				continue
 			}
 			i := 0
 			selectedOutpoint := outpoints[i]                              // Select first output
@@ -589,7 +607,7 @@ func (transactor *Transactor) createTransactions() {
 					lowDenomOutpoints[address] = make([]OutpointAndTxOut, 0)
 				} else if Contains(&lowDenoms, selectedOutpoint) {
 					// Skip if the outpoint is already in the lowDenomOutpoints list
-					if i >= len(outpoints)-1 {
+					if i > len(outpoints)-1 {
 						break
 					}
 					i++
@@ -597,7 +615,7 @@ func (transactor *Transactor) createTransactions() {
 					continue
 				}
 				lowDenomOutpoints[address] = append(lowDenomOutpoints[address], selectedOutpoint)
-				if i >= len(outpoints)-1 {
+				if i > len(outpoints)-1 {
 					break
 				}
 				i++
@@ -621,7 +639,7 @@ func (transactor *Transactor) createTransactions() {
 				denomIndex = 0
 			}
 
-			addresses := make(map[common.AddressBytes]struct{})
+			addresses := make(map[common.AddressBytes]bool)
 
 			in := types.TxIn{
 				PreviousOutPoint: *types.NewOutPoint(&selectedOutpoint.outpoint.TxHash, selectedOutpoint.outpoint.Index),
@@ -634,7 +652,7 @@ func (transactor *Transactor) createTransactions() {
 			//foundFeeInput := true
 			// Add a single low denomination outpoint to the transaction for fee
 			for address, outpoints := range lowDenomOutpoints {
-				if len(outpoints) == 0 || addressMap[address].PrivateKey == nil {
+				if len(outpoints) == 0 || addressMap[address].PrivateKey == nil || addresses[address] == true {
 					continue // Skip if no outpoints or no private key
 				}
 				lowDenomOutPoint := outpoints[0]
@@ -644,7 +662,7 @@ func (transactor *Transactor) createTransactions() {
 				})
 				privKeys = append(privKeys, addressMap[address].PrivateKey)
 				pubKeys = append(pubKeys, addressMap[address].PrivateKey.PubKey())
-				addresses[address] = struct{}{}
+				addresses[address] = true
 				lowDenomOutpoints[address] = lowDenomOutpoints[address][1:] // Remove the first outpoint used
 				if IntrinsicFee(uint64(len(inputs)), uint64(numOuts)).Cmp(types.Denominations[lowDenomOutPoint.txOut.Denomination]) == 1 {
 					//foundFeeInput = true
@@ -653,7 +671,7 @@ func (transactor *Transactor) createTransactions() {
 					break
 				}
 			}
-			addresses[address] = struct{}{}
+			addresses[address] = true
 
 			outs := make([]types.TxOut, 0)
 			for i := 0; i < numOuts; i++ {
@@ -681,7 +699,7 @@ func (transactor *Transactor) createTransactions() {
 				if !etx {
 					addressMap[toAddress].Balance.Add(addressMap[toAddress].Balance, types.Denominations[uint8(denomIndex)])
 				}
-				addresses[toAddress] = struct{}{}
+				addresses[toAddress] = true
 			}
 			//fmt.Println("Creating transaction for address: ", address, " with ", len(outs), " outputs")
 			spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
