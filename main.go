@@ -540,7 +540,7 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 
 	// Iterate over and display transactions in the block
 	txMutex.Lock()
-
+	defer txMutex.Unlock()
 	for _, tx := range block.QiTransactions() {
 		for i, txOut := range tx.TxOut() {
 			outpoint := &types.OutPoint{TxHash: tx.Hash(), Index: uint16(i)}
@@ -591,7 +591,6 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 			}
 		}
 	}
-	txMutex.Unlock()
 
 	totalOuts := 0
 	totalLowDenomOutpoints := 0
@@ -601,7 +600,6 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 	for _, outpoints := range lowDenomOutpoints {
 		totalLowDenomOutpoints += len(outpoints)
 	}
-	txMutex.Lock()
 	if totalOuts < int(numStartingInputs) && !createMaxOutputs && time.Since(startTime) > time.Minute*10 {
 		fmt.Printf("Running out of outputs - using backup!")
 		// Use backup spendable outpoints
@@ -620,7 +618,6 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 		createMaxOutputs = false
 		transactor.TargetTPS = transactor.config.TargetTps
 	}
-	txMutex.Unlock()
 	fmt.Printf("Total outpoints: %d LowDenomOutpoints: %d Blooming: %t\n", totalOuts, totalLowDenomOutpoints, createMaxOutputs)
 }
 
@@ -648,8 +645,8 @@ func (transactor *Transactor) createTransactions() {
 		prevNumTxs := numTxs
 		txMutex.Lock() // lock to read the spendableOutpoints map
 		for address, outpoints := range spendableOutpoints {
-			txMutex.Unlock()
 			txCreationStart := time.Now()
+			txMutex.Unlock()
 			txMutex.Lock()
 			if len(outpoints) == 0 {
 				// Don't unlock here because it's unlocked in the next iteration
@@ -709,8 +706,13 @@ func (transactor *Transactor) createTransactions() {
 				lowDenomOutpoints[address] = lowDenomOutpoints[address][1:] // Remove the first outpoint used
 				if IntrinsicFee(uint64(len(inputs)), uint64(numOuts)).Cmp(types.Denominations[lowDenomOutPoint.txOut.Denomination]) <= 1 {
 					foundFeeInput = true
-					denomIndex = selectedOutpoint.txOut.Denomination
-					numOuts = 1
+					if createMaxOutputs {
+						denomIndex = selectedOutpoint.txOut.Denomination - 1
+						numOuts = int(maxOutputs)
+					} else {
+						denomIndex = selectedOutpoint.txOut.Denomination
+						numOuts = 1
+					}
 					break
 				}
 			}
@@ -773,7 +775,7 @@ func (transactor *Transactor) createTransactions() {
 				Error := ((float64(transactor.TargetTPS) - transactor.CurrentTPS) + calculatedError) / 2
 				integral += (Error / 1000) * float64(time.Since(txTime).Milliseconds())
 				txTime = time.Now()
-				fmt.Printf("Error: %f BlockTps: %f TotalAverageCalcTps: %f Etxs: %d Integral: %f\n", Error, transactor.CurrentTPS, totalAverageTps, numEtxs, transactor.config.Ki*integral)
+				fmt.Printf("Target: %d Error: %f BlockTps: %f TotalAverageCalcTps: %f Etxs: %d Average tx creation time: %s\n", transactor.TargetTPS, Error, transactor.CurrentTPS, totalAverageTps, numEtxs, common.PrettyDuration(totalTxCreationTime/time.Duration(numTxs)))
 				fmt.Printf("Previous sleep time: %s\n", targetSleepTime)
 				targetSleepTime = targetSleepTime - time.Duration(transactor.config.Kp*Error*1e9) + time.Duration(transactor.config.Ki*integral*1e6) // 1e9 converts seconds to nanoseconds and 1e6 converts milliseconds to nanoseconds
 				fmt.Printf("New sleep time: %s\n", targetSleepTime)
