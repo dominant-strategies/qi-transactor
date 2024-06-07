@@ -8,8 +8,11 @@ import (
 	"log"
 	"math/big"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,6 +24,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr/musig2"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/dominant-strategies/go-quai/cmd/utils"
 	"github.com/dominant-strategies/go-quai/common"
 	"github.com/dominant-strategies/go-quai/core/types"
 	"github.com/dominant-strategies/go-quai/crypto"
@@ -68,6 +72,10 @@ var (
 	numStartingInputs        uint64
 	createMaxOutputs         bool
 	startTime                time.Time
+	totalNumOuts             int
+	totalLowDenomOuts        int
+	numTxsSent               int
+	totalTxCreationTime      = time.Duration(0)
 )
 
 type GenesisUTXO struct {
@@ -143,6 +151,7 @@ func main() {
 		fmt.Println("EtxFreq must be less than or equal to 0.5, setting to 0.5")
 		cfg.EtxFreq = 0.5
 	}
+
 	cfg.MemPoolMax = viper.GetInt("mempool.max")
 	cfg.Kp = viper.GetFloat64("kp")
 	cfg.Ki = viper.GetFloat64("ki")
@@ -216,6 +225,14 @@ func main() {
 		log.Fatalf("Invalid or no zone specified")
 	}
 
+	if viper.GetBool("enablePprof") {
+		runtime.SetBlockProfileRate(1)
+		runtime.SetMutexProfileFraction(1)
+		go func() {
+			fmt.Println(http.ListenAndServe("localhost:"+strconv.Itoa(utils.GetWSPort(location)+1000), nil))
+		}()
+	}
+
 	selectedZone = *zoneFlag
 	chainId = *chainIdFlag
 	keysFile = *keysFileFlag
@@ -245,7 +262,7 @@ func main() {
 		log.Fatalf("Error loading addresses: %v", err)
 	}
 
-	err = transactor.loadGenesisUtxos(genAllocPath)
+	err = transactor.loadGenesisUtxosFromNode(true)
 	if err != nil {
 		log.Fatalf("Error loading genesis UTXOs: %v", err)
 	}
@@ -339,13 +356,49 @@ func (transactor *Transactor) loadAddresses(filename, groupName string) error {
 	return nil
 }
 
+func (transactor *Transactor) loadGenesisUtxosFromNode(loadBackups bool) error {
+	start := time.Now()
+	numOuts := 0
+	for addr, _ := range addressMap {
+		outpoints, err := transactor.client.GetOutpointsByAddress(context.Background(), common.NewMixedcaseAddress(common.Bytes20ToAddress(addr, location)))
+		if err != nil {
+			return fmt.Errorf("error getting outpoints by address: %v", err)
+		}
+		numOuts += len(outpoints)
+		i := 0
+		for _, outpoint := range outpoints {
+			if outpoint.Denomination <= MIN_DENOMINATION {
+				lowDenomOutpoints[addr] = append(lowDenomOutpoints[addr], OutpointAndTxOut{
+					outpoint: types.NewOutPoint(&outpoint.TxHash, outpoint.Index),
+					txOut:    types.NewTxOut(outpoint.Denomination, addr[:], big.NewInt(0)),
+				})
+			} else {
+				if i%2 == 0 || !loadBackups {
+					spendableOutpoints[addr] = append(spendableOutpoints[addr], OutpointAndTxOut{
+						outpoint: types.NewOutPoint(&outpoint.TxHash, outpoint.Index),
+						txOut:    types.NewTxOut(outpoint.Denomination, addr[:], big.NewInt(0)),
+					})
+				} else {
+					backupSpendableOutpoints[addr] = append(backupSpendableOutpoints[addr], OutpointAndTxOut{
+						outpoint: types.NewOutPoint(&outpoint.TxHash, outpoint.Index),
+						txOut:    types.NewTxOut(outpoint.Denomination, addr[:], big.NewInt(0)),
+					})
+				}
+
+			}
+		}
+	}
+	fmt.Printf("Time to get %d outpoints: %s\n", numOuts, time.Since(start))
+	return nil
+}
+
 // loadGenesisUtxos loads genesis UTXOs from a specified file
 func (transactor *Transactor) loadGenesisUtxos(filename string) error {
+
 	file, err := ioutil.ReadFile(filename)
 	if err != nil {
 		return fmt.Errorf("error reading file: %v", err)
 	}
-
 	var utxos map[string]GenesisUTXO
 	if err := json.Unmarshal(file, &utxos); err != nil {
 		return fmt.Errorf("error unmarshalling JSON: %v", err)
@@ -597,24 +650,38 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 	for _, outpoints := range spendableOutpoints {
 		totalOuts += len(outpoints)
 	}
+	totalNumOuts = totalOuts
 	for _, outpoints := range lowDenomOutpoints {
 		totalLowDenomOutpoints += len(outpoints)
 	}
-	if totalOuts < int(numStartingInputs) && !createMaxOutputs && time.Since(startTime) > time.Minute*10 {
-		fmt.Printf("Running out of outputs - using backup!")
+	totalLowDenomOuts = totalLowDenomOutpoints
+	// Check if we are running out of outputs
+	if totalOuts <= 100 && !createMaxOutputs && time.Since(startTime) > time.Minute*10 {
+		fmt.Printf("Running out of outputs - using backup!\n")
 		// Use backup spendable outpoints
 		i := 0
+		outpointsAdded := 0
 		for address, outpoints := range backupSpendableOutpoints {
 			if i%2 == 0 {
 				spendableOutpoints[address] = append(spendableOutpoints[address], outpoints...)
 				delete(backupSpendableOutpoints, address)
 				i++
+				outpointsAdded += len(outpoints)
+			}
+		}
+		if outpointsAdded < 100 {
+			// Resync from node
+			err := transactor.loadGenesisUtxosFromNode(false)
+			if err != nil {
+				fmt.Printf("Error loading genesis UTXOs: %v\n", err)
 			}
 		}
 		createMaxOutputs = true
 		startTime = time.Now() // Begin bloom process again
+		numTxsSent = 0
+		totalTxCreationTime = time.Duration(0)
 		transactor.TargetTPS = transactor.config.BloomTps
-	} else if createMaxOutputs && (totalOuts > 250000 || time.Since(startTime) > time.Minute*30) {
+	} else if createMaxOutputs && (totalOuts > 250000 || time.Since(startTime) > time.Hour*2) {
 		createMaxOutputs = false
 		transactor.TargetTPS = transactor.config.TargetTps
 	}
@@ -626,23 +693,25 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 // for consolidation.
 func (transactor *Transactor) createTransactions() {
 	rand.Seed(time.Now().UnixNano()) // Seed the random number generator
-	numTxs := 0
 	numEtxs := 0
+	noSpendableOutputs := 0
 	txTime := time.Now()
-	integral := 0.0
 	// assume it takes 3 ms to construct a transaction
 	txCreationTime := time.Duration(3) * time.Millisecond
-	totalTxCreationTime := time.Duration(0)
 	tpsPerMachine := transactor.TargetTPS / transactor.config.MachinesRunning
 	targetSleepTime := (time.Second / time.Duration(tpsPerMachine)) - txCreationTime
 	if targetSleepTime < 0 {
 		targetSleepTime = 0
 	}
+	totalOuts := 0
+	for _, outpoints := range spendableOutpoints {
+		totalOuts += len(outpoints)
+	}
+	totalNumOuts = totalOuts
 	createMaxOutputs = true
-	toAddresses := make(map[string]uint)
 	for {
 
-		prevNumTxs := numTxs
+		prevNumTxs := numTxsSent
 		txMutex.Lock() // lock to read the spendableOutpoints map
 		for address, outpoints := range spendableOutpoints {
 			txCreationStart := time.Now()
@@ -668,7 +737,7 @@ func (transactor *Transactor) createTransactions() {
 			if selectedOutpoint.txOut.Denomination < 10 || uint64(numOuts) >= maxOutputs {
 				numOuts = int(maxOutputs - 1)
 			}
-			if numTxs%int(1/transactor.config.MaxOutputsFreq) == 0 && selectedOutpoint.txOut.Denomination > 0 {
+			if numTxsSent%int(1/transactor.config.MaxOutputsFreq) == 0 && selectedOutpoint.txOut.Denomination > 0 {
 				numOuts = int(maxOutputs) - 1
 			}
 			if createMaxOutputs {
@@ -721,14 +790,13 @@ func (transactor *Transactor) createTransactions() {
 			outs := make([]types.TxOut, 0)
 			for i := 0; i < numOuts; i++ {
 				etx := false
-				if transactor.config.EtxFreq > 0 && numTxs%(int(1/transactor.config.EtxFreq)) == 0 && i == 0 {
+				if transactor.config.EtxFreq > 0 && numTxsSent%(int(1/transactor.config.EtxFreq)) == 0 && i == 0 {
 					etx = true
 				}
 				toAddress := getRandomAddress(addressMap, etx)
 				if !toAddress.Location().Equal(location) {
 					numEtxs++
 				}
-				toAddresses[toAddress.Location().Name()]++
 				if _, exists := addresses[toAddress]; exists {
 					i-- // Try again if the address is already used
 					continue
@@ -762,26 +830,29 @@ func (transactor *Transactor) createTransactions() {
 			}
 			//fmt.Println("Creating transaction for address: ", address, " with ", len(outs), " outputs")
 			spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
+			totalNumOuts--
 			txMutex.Unlock()
 			transactor.makeUTXOTransaction(inputs, outs, privKeys, pubKeys)
 			totalTxCreationTime += time.Since(txCreationStart)
 			time.Sleep(targetSleepTime)
-			numTxs++
+			numTxsSent++
 			// Adjust the sleep time every 5 seconds
 			// Adjust sleep time using PI controller
 			if time.Since(txTime) > time.Second*5 && time.Since(startTime) > time.Minute {
-				totalAverageTps := (float64(numTxs) / float64(time.Since(startTime).Seconds()))
-				calculatedError := float64(transactor.TargetTPS)/float64(transactor.config.MachinesRunning) - totalAverageTps
-				Error := ((float64(transactor.TargetTPS) - transactor.CurrentTPS) + calculatedError) / 2
-				integral += (Error / 1000) * float64(time.Since(txTime).Milliseconds())
-				txTime = time.Now()
-				fmt.Printf("Target: %d Error: %f BlockTps: %f TotalAverageCalcTps: %f Etxs: %d Average tx creation time: %s\n", transactor.TargetTPS, Error, transactor.CurrentTPS, totalAverageTps, numEtxs, common.PrettyDuration(totalTxCreationTime/time.Duration(numTxs)))
-				fmt.Printf("Previous sleep time: %s\n", targetSleepTime)
-				targetSleepTime = targetSleepTime - time.Duration(transactor.config.Kp*Error*1e9) + time.Duration(transactor.config.Ki*integral*1e6) // 1e9 converts seconds to nanoseconds and 1e6 converts milliseconds to nanoseconds
-				fmt.Printf("New sleep time: %s\n", targetSleepTime)
-				for k, v := range toAddresses {
-					fmt.Printf("Location: %s, Count: %d\n", k, v)
+				totalAverageTpsFromMyPerspective := (float64(numTxsSent) / float64(time.Since(startTime).Seconds()))
+				calculatedErrorFromMyPerspective := float64(transactor.TargetTPS)/float64(transactor.config.MachinesRunning) - totalAverageTpsFromMyPerspective
+				calculatedErrorFromTheNodePerspective := float64(transactor.TargetTPS) - transactor.CurrentTPS
+				Error := (calculatedErrorFromTheNodePerspective + calculatedErrorFromTheNodePerspective + calculatedErrorFromMyPerspective) / 3
+				if transactor.CurrentTPS == 0 || createMaxOutputs { // Do not use block tps during bloom
+					Error = calculatedErrorFromMyPerspective
 				}
+				txTime = time.Now()
+				fmt.Printf("Target: %d Error: %f BlockTps: %f TotalAverageCalcTps: %f NumOuts: %d SentEtxs: %d Average tx creation time: %s\n", transactor.TargetTPS, Error, transactor.CurrentTPS, totalAverageTpsFromMyPerspective, totalNumOuts, numEtxs, common.PrettyDuration(totalTxCreationTime/time.Duration(numTxsSent)))
+				fmt.Printf("Previous sleep time: %s\n", targetSleepTime)
+				delta := time.Duration(transactor.config.Kp * Error * 1e9) // 1e9 converts seconds to nanoseconds and 1e6 converts milliseconds to nanoseconds
+				targetSleepTime = targetSleepTime - delta
+				fmt.Printf("Delta: %s\n", delta)
+				fmt.Printf("New sleep time: %s\n", targetSleepTime)
 				// Avoid negative or excessively long sleep times
 				if targetSleepTime < 0 {
 					targetSleepTime = 0
@@ -792,8 +863,43 @@ func (transactor *Transactor) createTransactions() {
 			txMutex.Lock() // Lock for reading the next iteration
 		}
 		txMutex.Unlock()
-		if prevNumTxs == numTxs {
-			fmt.Println("No spendable outpoints available.")
+		if prevNumTxs == numTxsSent {
+			noSpendableOutputs++
+			if noSpendableOutputs%1000 == 0 {
+				fmt.Println("No spendable outpoints available.")
+				time.Sleep(time.Minute)
+				fmt.Printf("Running out of outputs - using backup!")
+				// Use backup spendable outpoints
+				i := 0
+				txMutex.Lock()
+				outpointsAdded := 0
+				for address, outpoints := range backupSpendableOutpoints {
+					if i%2 == 0 {
+						spendableOutpoints[address] = append(spendableOutpoints[address], outpoints...)
+						delete(backupSpendableOutpoints, address)
+						i++
+						outpointsAdded += len(outpoints)
+					}
+				}
+				if outpointsAdded < 100 {
+					// Resync from node
+					err := transactor.loadGenesisUtxosFromNode(false)
+					if err != nil {
+						fmt.Printf("Error loading genesis UTXOs: %v\n", err)
+					}
+				}
+				startTime = time.Now() // Begin bloom process again
+				numTxsSent = 0
+				totalTxCreationTime = time.Duration(0)
+				createMaxOutputs = true
+				transactor.TargetTPS = transactor.config.BloomTps
+				totalOuts := 0
+				for _, outpoints := range spendableOutpoints {
+					totalOuts += len(outpoints)
+				}
+				totalNumOuts = totalOuts
+				txMutex.Unlock()
+			}
 		}
 	}
 
