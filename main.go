@@ -229,7 +229,7 @@ func main() {
 		runtime.SetBlockProfileRate(1)
 		runtime.SetMutexProfileFraction(1)
 		go func() {
-			fmt.Println(http.ListenAndServe("localhost:"+strconv.Itoa(utils.GetWSPort(location)+1000), nil))
+			fmt.Println(http.ListenAndServe("localhost:"+strconv.Itoa(utils.GetWSPort(location)+1010), nil))
 		}()
 	}
 
