@@ -16,7 +16,7 @@
 "memPool": {
     "max": 20000
   },
-"kp": 0.02,
-"ki": 0.005,
+"kp": 0.005,
+"ki": 0.0005,
 "enablePprof": true
 }
