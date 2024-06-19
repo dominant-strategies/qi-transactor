@@ -1,11 +1,11 @@
 {
 "env": "garden",
-"blockTime": 12000,
+"blockTime": 8000,
 "machinesRunning": 6,
 "txs": {
     "tps": {
       "bloomTps": 50,
-      "target": 500,
+      "target": 1000,
       "increment": {
         "enabled": false
       }
