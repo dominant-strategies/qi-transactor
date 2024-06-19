@@ -1,7 +1,7 @@
 {
 "env": "garden",
-"blockTime": 7000,
-"machinesRunning": 3,
+"blockTime": 12000,
+"machinesRunning": 6,
 "txs": {
     "tps": {
       "bloomTps": 50,
@@ -14,7 +14,7 @@
     "maxOutputsFreq": 0.1
   },
 "memPool": {
-    "max": 12000
+    "max": 20000
   },
 "kp": 0.02,
 "ki": 0.005,
