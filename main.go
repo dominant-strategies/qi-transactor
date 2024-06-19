@@ -45,10 +45,10 @@ var (
 )
 
 type AddressInfo struct {
-	Address    string
-	Index      int
-	Path       string
-	PrivateKey string
+	Address    string `json:"address"                     gencodec:"required"`
+	Index      int    `json:"index"                     gencodec:"required"`
+	Path       string `json:"path"                     gencodec:"required"`
+	PrivateKey string `json:"privateKey"                     gencodec:"required"`
 }
 
 // New struct to hold JSON file structure

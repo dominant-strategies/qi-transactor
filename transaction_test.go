@@ -495,11 +495,6 @@ func TestETXs(t *testing.T) {
 		t.Fatalf("Failed to connect to the Ethereum WebSocket client: %v", err)
 	}
 	defer client.Close()
-	cyprus2Client, err := ethclient.Dial(wsUrlCyprus2)
-	if err != nil {
-		t.Fatalf("Failed to connect to the Ethereum WebSocket client: %v", err)
-	}
-	defer cyprus2Client.Close()
 
 	for i := 0; i < 1000; i++ {
 		fromAddress := common.HexToAddress("0x000D8BfADBF40241101c430D25151D893c6b16D8", location)
@@ -512,16 +507,7 @@ func TestETXs(t *testing.T) {
 			t.Fatalf("Failed to convert public key to address: %v", err)
 		}
 
-		toAddress := common.HexToAddress("0x0109E949aF137F98bb6AF72102b9fE5C3d7e17cc", location)
-		toPrivKey, err := crypto.ToECDSA(common.FromHex("0x090fb448d46419ff13b6ee340f480623fd63e208b7bee788e79f35c63e428c3f"))
-		if err != nil {
-			t.Fatalf("Failed to convert private key to ECDSA: %v", err)
-		}
-		to := crypto.PubkeyToAddress(toPrivKey.PublicKey, location)
-		if !to.Equal(toAddress) {
-			t.Fatalf("Failed to convert public key to address: %v", err)
-		}
-
+		toAddress := common.HexToAddress("0x1109E949aF137F98bb6AF72102b9fE5C3d7e17cc", location)
 		signer := types.LatestSigner(PARAMS)
 
 		nonce, err := client.PendingNonceAt(context.Background(), from.MixedcaseAddress())
@@ -538,7 +524,7 @@ func TestETXs(t *testing.T) {
 		fmt.Println("Balance: ", balance)
 		fmt.Println("Nonce: ", nonce)
 
-		inner_tx := types.QuaiTx{ChainID: PARAMS.ChainID, Nonce: nonce, GasTipCap: MINERTIP, GasFeeCap: BASEFEE, Gas: GAS * 3, To: &to, Value: VALUE, Data: nil, AccessList: types.AccessList{}}
+		inner_tx := types.QuaiTx{ChainID: PARAMS.ChainID, Nonce: nonce, GasTipCap: MINERTIP, GasFeeCap: BASEFEE, Gas: GAS * 3, To: &toAddress, Value: VALUE, Data: nil, AccessList: types.AccessList{}}
 		tx := types.NewTx(&inner_tx)
 
 		tx, err = types.SignTx(tx, signer, privKey)
