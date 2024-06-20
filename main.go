@@ -26,6 +26,7 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/dominant-strategies/go-quai/cmd/utils"
 	"github.com/dominant-strategies/go-quai/common"
+	"github.com/dominant-strategies/go-quai/core"
 	"github.com/dominant-strategies/go-quai/core/types"
 	"github.com/dominant-strategies/go-quai/crypto"
 	"github.com/dominant-strategies/go-quai/params"
@@ -76,6 +77,7 @@ var (
 	totalLowDenomOuts        int
 	numTxsSent               int
 	totalTxCreationTime      = time.Duration(0)
+	MaxPoolSize              = core.DefaultTxPoolConfig.QiPoolSize
 )
 
 type GenesisUTXO struct {
@@ -88,8 +90,6 @@ type OutpointAndTxOut struct {
 	outpoint *types.OutPoint
 	txOut    *types.TxOut
 }
-
-const maxBlocks = 50
 
 var (
 	headerHashes []common.Hash
@@ -107,7 +107,10 @@ type ConsolidatedOutpoint struct {
 	denomination uint8
 }
 
-var MIN_DENOMINATION = uint8(2) // 2 for usual, 13 for testing
+const (
+	MIN_DENOMINATION = uint8(2) // 2 for usual, 13 for testing
+	maxBlocks        = 50
+)
 
 type Transactor struct {
 	client     *ethclient.Client
@@ -871,6 +874,15 @@ func (transactor *Transactor) createTransactions() {
 					targetSleepTime = 0
 				} else if targetSleepTime > time.Second {
 					targetSleepTime = time.Second
+				}
+				statuses, err := transactor.client.TxPoolStatus(context.Background())
+				if err != nil {
+					fmt.Printf("Error getting tx pool status: %v\n", err)
+				} else {
+					if uint(statuses["qi"]) >= uint(MaxPoolSize) { // Qi pool is full
+						fmt.Printf("Qi pool size: %d\n", statuses["qi"])
+						time.Sleep(time.Second * 10)
+					}
 				}
 			}
 			txMutex.Lock() // Lock for reading the next iteration
