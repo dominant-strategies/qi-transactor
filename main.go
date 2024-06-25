@@ -681,7 +681,7 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 		numTxsSent = 0
 		totalTxCreationTime = time.Duration(0)
 		transactor.TargetTPS = transactor.config.BloomTps
-	} else if createMaxOutputs && (totalOuts > 250000 || time.Since(startTime) > time.Hour*2) {
+	} else if createMaxOutputs && (totalOuts > 25000 || time.Since(startTime) > time.Hour*2) {
 		createMaxOutputs = false
 		transactor.TargetTPS = transactor.config.TargetTps
 	}
