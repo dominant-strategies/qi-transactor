@@ -124,6 +124,7 @@ type Config struct {
 	BloomTps        int     `json:"bloomTps"`
 	Increment       bool    `json:"increment"`
 	EtxFreq         float64 `json:"etxFreq"`
+	ConvertFreq     float64 `json:"convertFreq"`
 	Kp              float64 `json:"kp"` // proportional gain for P controller
 	Ki              float64 `json:"ki"` // integral gain for PI controller
 	MemPoolMax      int     `json:"memPoolMax"`
@@ -150,6 +151,11 @@ func main() {
 	if cfg.EtxFreq > 0.5 {
 		fmt.Println("EtxFreq must be less than or equal to 0.5, setting to 0.5")
 		cfg.EtxFreq = 0.5
+	}
+	cfg.ConvertFreq = viper.GetFloat64("txs.convertFreq")
+	if cfg.ConvertFreq > 0.5 {
+		fmt.Println("ConvertFreq must be less than or equal to 0.5, setting to 0.5")
+		cfg.ConvertFreq = 0.5
 	}
 
 	cfg.MemPoolMax = viper.GetInt("mempool.max")
@@ -694,6 +700,7 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 func (transactor *Transactor) createTransactions() {
 	rand.Seed(time.Now().UnixNano()) // Seed the random number generator
 	numEtxs := 0
+	numConverts := 0
 	noSpendableOutputs := 0
 	txTime := time.Now()
 	// assume it takes 3 ms to construct a transaction
@@ -793,7 +800,12 @@ func (transactor *Transactor) createTransactions() {
 				if transactor.config.EtxFreq > 0 && numTxsSent%(int(1/transactor.config.EtxFreq)) == 0 && i == 0 {
 					etx = true
 				}
-				toAddress := getRandomAddress(addressMap, etx)
+				conversion := false
+				if transactor.config.ConvertFreq > 0 && numTxsSent%(int(1/transactor.config.ConvertFreq)) == 0 && i == 0 {
+					conversion = true
+					numConverts++
+				}
+				toAddress := getRandomAddress(addressMap, etx, conversion)
 				if !toAddress.Location().Equal(location) {
 					numEtxs++
 				}
@@ -809,16 +821,16 @@ func (transactor *Transactor) createTransactions() {
 				outs = append(outs, newOut)
 
 				// Track the balance of added outpoints
-				if !etx {
+				if !etx && !conversion {
 					addressMap[toAddress].Balance.Add(addressMap[toAddress].Balance, types.Denominations[uint8(denomIndex)])
 				}
 				addresses[toAddress] = true
 			}
 			if numOuts == int(maxOutputs-1) && !foundFeeInput {
 				// Add a low denomination output
-				toAddress := getRandomAddress(addressMap, false)
+				toAddress := getRandomAddress(addressMap, false, false)
 				if _, exists := addresses[toAddress]; exists {
-					toAddress = getRandomAddress(addressMap, false) // Try again if the address is already used
+					toAddress = getRandomAddress(addressMap, false, false) // Try again if the address is already used
 				}
 				newOut := types.TxOut{
 					Denomination: MIN_DENOMINATION,
@@ -847,7 +859,8 @@ func (transactor *Transactor) createTransactions() {
 					Error = calculatedErrorFromMyPerspective
 				}
 				txTime = time.Now()
-				fmt.Printf("Target: %d Error: %f BlockTps: %f TotalAverageCalcTps: %f NumOuts: %d SentEtxs: %d Average tx creation time: %s\n", transactor.TargetTPS, Error, transactor.CurrentTPS, totalAverageTpsFromMyPerspective, totalNumOuts, numEtxs, common.PrettyDuration(totalTxCreationTime/time.Duration(numTxsSent)))
+				fmt.Printf("Target: %d Error: %f BlockTps: %f TotalAverageCalcTps: %f NumOuts: %d SentEtxs: %d SentConverts: %d, Average tx creation time: %s\n",
+					transactor.TargetTPS, Error, transactor.CurrentTPS, totalAverageTpsFromMyPerspective, totalNumOuts, numEtxs, numConverts, common.PrettyDuration(totalTxCreationTime/time.Duration(numTxsSent)))
 				fmt.Printf("Previous sleep time: %s\n", targetSleepTime)
 				delta := time.Duration(transactor.config.Kp * Error * 1e9) // 1e9 converts seconds to nanoseconds and 1e6 converts milliseconds to nanoseconds
 				targetSleepTime = targetSleepTime - delta
@@ -906,7 +919,7 @@ func (transactor *Transactor) createTransactions() {
 }
 
 // Utility function to get a random address from addressMap, excluding the input address
-func getRandomAddress(addressMap map[common.AddressBytes]AddressData, etx bool) common.AddressBytes {
+func getRandomAddress(addressMap map[common.AddressBytes]AddressData, etx bool, conversion bool) common.AddressBytes {
 	keys := make([]common.AddressBytes, 0, len(addressMap))
 	for k := range addressMap {
 		keys = append(keys, k)
@@ -915,12 +928,17 @@ func getRandomAddress(addressMap map[common.AddressBytes]AddressData, etx bool) 
 		return common.AddressBytes{} // Handle case where addressMap is empty
 	}
 	randIndex := rand.Intn(len(keys))
+	if conversion {
+		selectedAddr := keys[randIndex]
+		selectedAddr[1] = 127 // convert selected Qi address to random Quai address
+		return selectedAddr
+	}
 	if etx {
 		randIndex = rand.Intn(len(etxAddresses))
 		return etxAddresses[randIndex]
 	}
 	if addressMap[keys[randIndex]].PrivateKey == nil {
-		return getRandomAddress(addressMap, etx) // Try again if the address has no private key
+		return getRandomAddress(addressMap, etx, conversion) // Try again if the address has no private key
 	}
 	return keys[randIndex]
 }

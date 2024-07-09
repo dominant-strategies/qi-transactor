@@ -11,6 +11,7 @@
       }
     },
     "etxFreq": 0.1,
+    "convertFreq": 0.01,
     "maxOutputsFreq": 0.1
   },
 "memPool": {

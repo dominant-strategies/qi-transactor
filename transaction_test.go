@@ -34,13 +34,15 @@ var (
 	GAS      = uint64(21000)
 	VALUE    = big.NewInt(1)
 	// Change the params to the proper chain config
-	PARAMS       = params.Blake3PowLocalChainConfig
-	wsUrlCyprus2 = "ws://127.0.0.1:8201"
-	wsUrl_       = "ws://127.0.0.1:8200"
-	qiAddr       = "0x00899DD5871a40E2c67d0645B8DcEb4Dc7974a59"
-	qiPrivkey    = "0x383bd2269958a23e0391be01d255316363e2fa22269cbdc48052343346a4dcd8"
-	quaiAddr     = "0x000D8BfADBF40241101c430D25151D893c6b16D8"
-	quaiPrivkey  = "0x5eec99c44ec18c4b9e7136e259b58fa4879db568ff20245011de1f77af306e72"
+	PARAMS              = params.Blake3PowLocalChainConfig
+	wsUrlCyprus2        = "ws://127.0.0.1:8201"
+	wsUrl_              = "ws://127.0.0.1:8200"
+	qiAddr              = "0x00899DD5871a40E2c67d0645B8DcEb4Dc7974a59"
+	qiPrivkey           = "0x383bd2269958a23e0391be01d255316363e2fa22269cbdc48052343346a4dcd8"
+	quaiAddr            = "0x000D8BfADBF40241101c430D25151D893c6b16D8"
+	quaiPrivkey         = "0x5eec99c44ec18c4b9e7136e259b58fa4879db568ff20245011de1f77af306e72"
+	quaiGenAllocAddr    = "0x002a8cf994379232561556Da89C148eeec9539cd"
+	quaiGenAllocPrivKey = "0xefdc32bef4218d3e5bae3858e45d4f18ed257c617bd8b7bae0939fae6f6bd6d6"
 )
 
 func TestSchnorrSignature(t *testing.T) {
@@ -187,8 +189,8 @@ func TestQiConversion(t *testing.T) {
 	privkey := common.FromHex(qiPrivkey) //"383bd2269958a23e0391be01d255316363e2fa22269cbdc48052343346a4dcd8")
 	schnorrPrivKey, schnorrPubKey := btcec.PrivKeyFromBytes(privkey)
 	//0x625c4e3d17bbf9ad748d822b0359c36f52786198b58acd02fe05c207a600a0cdETXIndex:
-	toAddress := common.HexToAddress(quaiAddr, location)
-	outpointHash := common.HexToHash("0x008a008957f340a55c02b486d897cc03ac5ac88b127611cda44cd3660d53df5b")
+	toAddress := common.HexToAddress(quaiGenAllocAddr, location)
+	outpointHash := common.HexToHash("1eb100e02d23e1793c2ac049033bc8ca47bebc27364e9f8fc657df43d2ba1e43")
 	outpointIndex := uint16(0)
 	prevOut := types.OutPoint{outpointHash, outpointIndex}
 
@@ -245,8 +247,8 @@ func TestRedeemQuai(t *testing.T) {
 		t.Fatalf("Failed to connect to the Ethereum WebSocket client: %v", err)
 	}
 	defer client.Close()
-	fromAddress := common.HexToAddress(quaiAddr, location)
-	privKey, err := crypto.ToECDSA(common.FromHex(quaiPrivkey))
+	fromAddress := common.HexToAddress(quaiGenAllocAddr, location)
+	privKey, err := crypto.ToECDSA(common.FromHex(quaiGenAllocPrivKey))
 	if err != nil {
 		t.Fatalf("Failed to convert private key to ECDSA: %v", err)
 	}
@@ -310,8 +312,8 @@ func TestRedeemQuai(t *testing.T) {
 }
 
 func TestQuaiConversion(t *testing.T) {
-	fromAddress := common.HexToAddress(quaiAddr, location)
-	privKey, err := crypto.ToECDSA(common.FromHex(quaiPrivkey))
+	fromAddress := common.HexToAddress(quaiGenAllocAddr, location)
+	privKey, err := crypto.ToECDSA(common.FromHex(quaiGenAllocPrivKey))
 	if err != nil {
 		t.Fatalf("Failed to convert private key to ECDSA: %v", err)
 	}
@@ -365,7 +367,7 @@ func TestQuaiConversion(t *testing.T) {
 		t.Fail()
 		return
 	}
-	time.Sleep(60 * time.Second)
+	//time.Sleep(60 * time.Second)
 	tx, isPending, err := client.TransactionByHash(context.Background(), tx.Hash(location...))
 	fmt.Printf("tx: %+v isPending: %v err: %v\n", tx, isPending, err)
 	receipt, err := client.TransactionReceipt(context.Background(), tx.Hash())
@@ -497,8 +499,8 @@ func TestETXs(t *testing.T) {
 	defer client.Close()
 
 	for i := 0; i < 1000; i++ {
-		fromAddress := common.HexToAddress("0x000D8BfADBF40241101c430D25151D893c6b16D8", location)
-		privKey, err := crypto.ToECDSA(common.FromHex(quaiPrivkey))
+		fromAddress := common.HexToAddress(quaiGenAllocAddr, location)
+		privKey, err := crypto.ToECDSA(common.FromHex(quaiGenAllocPrivKey))
 		if err != nil {
 			t.Fatalf("Failed to convert private key to ECDSA: %v", err)
 		}
