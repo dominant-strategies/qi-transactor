@@ -445,7 +445,7 @@ func (transactor *Transactor) loadGenesisUtxos(filename string) error {
 }
 
 // Create a transaction for a given input and output set
-func (transactor *Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.TxOut, privKeys []*secp256k1.PrivateKey, pubKeys []*secp256k1.PublicKey) *types.Transaction {
+func (transactor *Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types.TxOut, privKeys []*secp256k1.PrivateKey, pubKeys []*secp256k1.PublicKey) error {
 	// key = hash(blockHash, index)
 	// Find hash / index for originUtxo / imagine this is block hash
 
@@ -489,37 +489,13 @@ func (transactor *Transactor) makeUTXOTransaction(ins []types.TxIn, outs []types
 
 	signedTx := types.NewTx(signedUtxo)
 
-	// Verify the transaction signature
-	var finalKey *btcec.PublicKey
-	if len(tx.TxIn()) > 1 {
-		aggKey, _, _, err := musig2.AggregateKeys(
-			pubKeys, false,
-		)
-		if err != nil {
-			return nil
-		}
-		finalKey = aggKey.FinalKey
-	} else {
-		finalKey = pubKeys[0]
-	}
-
-	if !sig.Verify(txHash[:], finalKey) {
-		log.Fatal("Failed to verify signature")
-	}
-
-	txDigestHash := signer.Hash(tx)
-	if !signedTx.GetSchnorrSignature().Verify(txDigestHash[:], finalKey) {
-		log.Fatalf("Failed to verify signature, len pubkeys %d", len(pubKeys))
-		return nil
-	}
-
 	// Send the transaction
 	err = transactor.client.SendTransaction(context.Background(), signedTx)
 	if err != nil {
 		log.Printf("Failed to send transaction: %v", err)
 	}
 
-	return tx
+	return err
 }
 
 // listenForNewBlocks listens for new blocks and processes them
@@ -844,10 +820,17 @@ func (transactor *Transactor) createTransactions() {
 				addresses[toAddress] = true
 			}
 			//fmt.Println("Creating transaction for address: ", address, " with ", len(outs), " outputs")
-			spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
-			totalNumOuts--
+
+			if err := transactor.makeUTXOTransaction(inputs, outs, privKeys, pubKeys); err != nil {
+				if !strings.Contains(err.Error(), "txpool is full") { // Transaction is still valid if the txpool is full
+					spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
+					totalNumOuts--
+				}
+			} else {
+				spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
+				totalNumOuts--
+			}
 			txMutex.Unlock()
-			transactor.makeUTXOTransaction(inputs, outs, privKeys, pubKeys)
 			totalTxCreationTime += time.Since(txCreationStart)
 			time.Sleep(targetSleepTime)
 			numTxsSent++
@@ -881,7 +864,7 @@ func (transactor *Transactor) createTransactions() {
 				} else {
 					if uint(statuses["qi"]) >= uint(MaxPoolSize) { // Qi pool is full
 						fmt.Printf("Qi pool size: %d\n", statuses["qi"])
-						time.Sleep(time.Second * 10)
+						time.Sleep(time.Second * 5)
 					}
 				}
 			}
