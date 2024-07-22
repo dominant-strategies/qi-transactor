@@ -2,16 +2,17 @@
 "env": "garden",
 "blockTime": 8000,
 "machinesRunning": 6,
+"numSlices": 1,
 "txs": {
     "tps": {
-      "bloomTps": 50,
+      "bloomTps": 100,
       "target": 1000,
       "increment": {
         "enabled": false
       }
     },
     "etxFreq": 0.1,
-    "convertFreq": 0.01,
+    "convertFreq": 0.0,
     "maxOutputsFreq": 0.1
   },
 "memPool": {

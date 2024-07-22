@@ -99,6 +99,7 @@ var (
 type blockInfo struct {
 	Time             time.Time
 	TransactionCount int
+	Hash             common.Hash
 }
 
 type ConsolidatedOutpoint struct {
@@ -132,6 +133,7 @@ type Config struct {
 	Ki              float64 `json:"ki"` // integral gain for PI controller
 	MemPoolMax      int     `json:"memPoolMax"`
 	MaxOutputsFreq  float64 `json:"maxOutputsFreq"`
+	NumZones        int     `json:"numSlices"`
 }
 
 func main() {
@@ -147,7 +149,6 @@ func main() {
 	cfg.Env = viper.GetString("env")
 	cfg.BlockTime = viper.GetInt("blockTime")
 	cfg.MachinesRunning = viper.GetInt("machinesRunning")
-	cfg.TargetTps = viper.GetInt("txs.tps.target")
 	cfg.BloomTps = viper.GetInt("txs.tps.bloomTps")
 	cfg.Increment = viper.GetBool("txs.tps.increment.enabled")
 	cfg.EtxFreq = viper.GetFloat64("txs.etxFreq")
@@ -168,6 +169,14 @@ func main() {
 	if cfg.MaxOutputsFreq > 0.5 {
 		fmt.Println("MaxOutputsFreq must be less than or equal to 0.5, setting to 0.5")
 		cfg.MaxOutputsFreq = 0.5
+	}
+	cfg.NumZones = viper.GetInt("numSlices")
+	if cfg.NumZones == 0 {
+		cfg.NumZones = 1
+	}
+	cfg.TargetTps = viper.GetInt("txs.tps.target") / cfg.NumZones
+	if cfg.TargetTps == 0 {
+		cfg.TargetTps = 1
 	}
 	// Now you can use cfg to access the configuration
 	fmt.Printf("Environment: %s\n", cfg.Env)
@@ -555,6 +564,7 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 	currentBlockInfo := blockInfo{
 		Time:             time.Unix(int64(block.Time()), 0),
 		TransactionCount: len(block.QiTransactions()),
+		Hash:             block.Hash(),
 	}
 	blockInfos = append(blockInfos, currentBlockInfo)
 	if len(blockInfos) > maxBlocks {
@@ -685,6 +695,9 @@ func (transactor *Transactor) createTransactions() {
 	// assume it takes 3 ms to construct a transaction
 	txCreationTime := time.Duration(3) * time.Millisecond
 	tpsPerMachine := transactor.TargetTPS / transactor.config.MachinesRunning
+	if tpsPerMachine == 0 {
+		tpsPerMachine = 1
+	}
 	targetSleepTime := (time.Second / time.Duration(tpsPerMachine)) - txCreationTime
 	if targetSleepTime < 0 {
 		targetSleepTime = 0
@@ -746,19 +759,19 @@ func (transactor *Transactor) createTransactions() {
 			inputs := []types.TxIn{in}
 			foundFeeInput := false
 			// Add a single low denomination outpoint to the transaction for fee
-			for address, outpoints := range lowDenomOutpoints {
-				if len(outpoints) == 0 || addressMap[address].PrivateKey == nil || addresses[address] == true {
+			for lowDenomAddr, outpoints := range lowDenomOutpoints {
+				if len(outpoints) == 0 || addressMap[lowDenomAddr].PrivateKey == nil || addresses[lowDenomAddr] == true {
 					continue // Skip if no outpoints or no private key
 				}
 				lowDenomOutPoint := outpoints[0]
 				inputs = append(inputs, types.TxIn{
 					PreviousOutPoint: *types.NewOutPoint(&lowDenomOutPoint.outpoint.TxHash, lowDenomOutPoint.outpoint.Index),
-					PubKey:           addressMap[address].PrivateKey.PubKey().SerializeUncompressed(),
+					PubKey:           addressMap[lowDenomAddr].PrivateKey.PubKey().SerializeUncompressed(),
 				})
-				privKeys = append(privKeys, addressMap[address].PrivateKey)
-				pubKeys = append(pubKeys, addressMap[address].PrivateKey.PubKey())
-				addresses[address] = true
-				lowDenomOutpoints[address] = lowDenomOutpoints[address][1:] // Remove the first outpoint used
+				privKeys = append(privKeys, addressMap[lowDenomAddr].PrivateKey)
+				pubKeys = append(pubKeys, addressMap[lowDenomAddr].PrivateKey.PubKey())
+				addresses[lowDenomAddr] = true
+				lowDenomOutpoints[lowDenomAddr] = lowDenomOutpoints[lowDenomAddr][1:] // Remove the first outpoint used
 				if IntrinsicFee(uint64(len(inputs)), uint64(numOuts)).Cmp(types.Denominations[lowDenomOutPoint.txOut.Denomination]) <= 1 {
 					foundFeeInput = true
 					if createMaxOutputs {
