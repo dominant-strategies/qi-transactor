@@ -2,7 +2,7 @@
 "env": "garden",
 "blockTime": 8000,
 "machinesRunning": 6,
-"numSlices": 1,
+"numSlices": 9,
 "txs": {
     "tps": {
       "bloomTps": 100,
