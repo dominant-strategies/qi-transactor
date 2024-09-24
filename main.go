@@ -845,7 +845,7 @@ func (transactor *Transactor) createTransactions() {
 			}
 			txMutex.Unlock()
 			totalTxCreationTime += time.Since(txCreationStart)
-			time.Sleep(targetSleepTime)
+			time.Sleep(time.Duration(300) * time.Millisecond)
 			numTxsSent++
 			// Adjust the sleep time every 5 seconds
 			// Adjust sleep time using PI controller
