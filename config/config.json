@@ -11,7 +11,7 @@
         "enabled": false
       }
     },
-    "etxFreq": 0.1,
+    "etxFreq": 0,
     "convertFreq": 0.0,
     "maxOutputsFreq": 0.1
   },
