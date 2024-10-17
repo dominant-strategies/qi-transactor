@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math"
 	"math/big"
 	"math/rand"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/dominant-strategies/go-quai/cmd/utils"
 	"github.com/dominant-strategies/go-quai/common"
+	"github.com/dominant-strategies/go-quai/consensus/misc"
 	"github.com/dominant-strategies/go-quai/core"
 	"github.com/dominant-strategies/go-quai/core/types"
 	"github.com/dominant-strategies/go-quai/crypto"
@@ -114,10 +116,14 @@ const (
 )
 
 type Transactor struct {
-	client     *ethclient.Client
-	config     Config
-	CurrentTPS float64
-	TargetTPS  int
+	client          *ethclient.Client
+	config          Config
+	CurrentTPS      float64
+	TargetTPS       int
+	location        common.Location
+	qiScalingFactor float64
+	baseFee         *big.Int
+	latestBlock     *types.WorkObject
 }
 
 type Config struct {
@@ -541,6 +547,17 @@ var totalTransactions int
 // and update the spendableOutpoints map
 func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 	// Retrieve the block by its hash
+	utxoSetSize, err := transactor.client.GetLatestUTXOSetSize(context.Background())
+	if err != nil {
+		time.Sleep(100 * time.Millisecond) // wait for block to be stored
+		utxoSetSize, err = transactor.client.GetLatestUTXOSetSize(context.Background())
+		if err != nil {
+			fmt.Printf("Failed to retrieve the UTXO set size after trying twice: %s %s\n", hash, err)
+		}
+	}
+	if utxoSetSize > 0 {
+		transactor.qiScalingFactor = math.Log(float64(utxoSetSize))
+	}
 	block, err := transactor.client.BlockByHash(context.Background(), hash)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -556,9 +573,14 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 		}
 
 	}
-
+	transactor.latestBlock = block
+	if block.BaseFee().Sign() > 0 {
+		transactor.baseFee = block.BaseFee()
+	} else {
+		transactor.baseFee = misc.QiToQuai(block, params.MinBaseFeeInQits)
+	}
 	// Display block information
-	fmt.Printf("number: %d txs: %d  hash: %s\n", block.WorkObjectHeader().NumberU64(), len(block.QiTransactions()), block.Hash().Hex())
+	fmt.Printf("number: %d txs: %d hash: %s gasUsed: %d basefee: %d basefee qits: %d\n", block.WorkObjectHeader().NumberU64(), len(block.QiTransactions()), block.Hash().Hex(), block.GasUsed(), block.BaseFee(), misc.QuaiToQi(block, block.BaseFee()))
 
 	// Calculate TPS based on block time
 	currentBlockInfo := blockInfo{
@@ -692,6 +714,12 @@ func (transactor *Transactor) createTransactions() {
 	numConverts := 0
 	noSpendableOutputs := 0
 	txTime := time.Now()
+	// Temp big int allocations to help the gc
+	fee := new(big.Int)
+	tempBigIntFee2 := new(big.Int)
+	tempBigIntFee3 := new(big.Int)
+	tempBigIntFee4 := new(big.Int)
+	big10 := big.NewInt(10)
 	// assume it takes 3 ms to construct a transaction
 	txCreationTime := time.Duration(3) * time.Millisecond
 	tpsPerMachine := transactor.TargetTPS / transactor.config.MachinesRunning
@@ -713,6 +741,10 @@ func (transactor *Transactor) createTransactions() {
 		prevNumTxs := numTxsSent
 		txMutex.Lock() // lock to read the spendableOutpoints map
 		for address, outpoints := range spendableOutpoints {
+			if transactor.latestBlock == nil {
+				time.Sleep(1 * time.Second)
+				continue
+			}
 			txCreationStart := time.Now()
 			txMutex.Unlock()
 			txMutex.Lock()
@@ -731,21 +763,6 @@ func (transactor *Transactor) createTransactions() {
 				fmt.Printf("Outpoint is low denomination: %d\n", selectedOutpoint.txOut.Denomination)
 				continue
 			}
-			maxOutputs := new(big.Int).Div(types.Denominations[selectedOutpoint.txOut.Denomination], types.Denominations[selectedOutpoint.txOut.Denomination-1]).Uint64()
-			numOuts := 3
-			if selectedOutpoint.txOut.Denomination < 10 || uint64(numOuts) >= maxOutputs {
-				numOuts = int(maxOutputs - 1)
-			}
-			if numTxsSent%int(1/transactor.config.MaxOutputsFreq) == 0 && selectedOutpoint.txOut.Denomination > 0 {
-				numOuts = int(maxOutputs) - 1
-			}
-			if createMaxOutputs {
-				numOuts = int(maxOutputs) - 1
-			}
-			denomIndex := selectedOutpoint.txOut.Denomination - 1
-			if selectedOutpoint.txOut.Denomination == 0 {
-				denomIndex = 0
-			}
 
 			addresses := make(map[common.AddressBytes]bool)
 
@@ -753,94 +770,274 @@ func (transactor *Transactor) createTransactions() {
 				PreviousOutPoint: *types.NewOutPoint(&selectedOutpoint.outpoint.TxHash, selectedOutpoint.outpoint.Index),
 				PubKey:           addressMap[address].PrivateKey.PubKey().SerializeUncompressed(),
 			}
+			addresses[address] = true
 
 			privKeys := []*secp256k1.PrivateKey{addressMap[address].PrivateKey}
 			pubKeys := []*secp256k1.PublicKey{addressMap[address].PrivateKey.PubKey()}
 			inputs := []types.TxIn{in}
-			foundFeeInput := false
-			// Add a single low denomination outpoint to the transaction for fee
-			for lowDenomAddr, outpoints := range lowDenomOutpoints {
-				if len(outpoints) == 0 || addressMap[lowDenomAddr].PrivateKey == nil || addresses[lowDenomAddr] == true {
-					continue // Skip if no outpoints or no private key
-				}
-				lowDenomOutPoint := outpoints[0]
-				inputs = append(inputs, types.TxIn{
-					PreviousOutPoint: *types.NewOutPoint(&lowDenomOutPoint.outpoint.TxHash, lowDenomOutPoint.outpoint.Index),
-					PubKey:           addressMap[lowDenomAddr].PrivateKey.PubKey().SerializeUncompressed(),
-				})
-				privKeys = append(privKeys, addressMap[lowDenomAddr].PrivateKey)
-				pubKeys = append(pubKeys, addressMap[lowDenomAddr].PrivateKey.PubKey())
-				addresses[lowDenomAddr] = true
-				lowDenomOutpoints[lowDenomAddr] = lowDenomOutpoints[lowDenomAddr][1:] // Remove the first outpoint used
-				if IntrinsicFee(uint64(len(inputs)), uint64(numOuts)).Cmp(types.Denominations[lowDenomOutPoint.txOut.Denomination]) <= 1 {
-					foundFeeInput = true
-					if createMaxOutputs {
-						denomIndex = selectedOutpoint.txOut.Denomination - 1
-						numOuts = int(maxOutputs)
-					} else {
-						denomIndex = selectedOutpoint.txOut.Denomination
-						numOuts = 1
-					}
-					break
-				}
-			}
-			addresses[address] = true
-
 			outs := make([]types.TxOut, 0)
-			for i := 0; i < numOuts; i++ {
-				etx := false
-				if transactor.config.EtxFreq > 0 && numTxsSent%(int(1/transactor.config.EtxFreq)) == 0 && i == 0 {
-					etx = true
-				}
+			totalInputQits := types.Denominations[selectedOutpoint.txOut.Denomination].Uint64()
+			totalOutputQits := uint64(0)
+			foundFeeInput := false
+			inputsMap := make(map[uint]uint64)
+			inputsMap[uint(selectedOutpoint.txOut.Denomination)]++
+			if totalLowDenomOuts >= 1000 || !(selectedOutpoint.txOut.Denomination == 15 || selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 9) {
+				// 11 : 3x10 1x9
+				// 5: 2x4 1x3
+				/*if selectedOutpoint.txOut.Denomination == 11 {
+					for i := 0; i < 3; i++ {
+						toAddress := getRandomAddress(addressMap, false, false)
+						if _, exists := addresses[toAddress]; exists {
+							i-- // Try again if the address is already used
+							continue
+						}
+						newOut := types.TxOut{
+							Denomination: 10,
+							Address:      toAddress[:],
+						}
+						outs = append(outs, newOut)
+						totalOutputQits += types.Denominations[10].Uint64()
+						addresses[toAddress] = true
+					}
+					toAddress := getRandomAddress(addressMap, false, false)
+					if _, exists := addresses[toAddress]; exists {
+						toAddress = getRandomAddress(addressMap, false, false) // Try again if the address is already used
+					}
+					outs = append(outs, types.TxOut{
+						Denomination: 9,
+						Address:      toAddress[:],
+					})
+					totalOutputQits += types.Denominations[9].Uint64()
+					addresses[toAddress] = true
+				} else if selectedOutpoint.txOut.Denomination == 5 {
+					for i := 0; i < 2; i++ {
+						toAddress := getRandomAddress(addressMap, false, false)
+						if _, exists := addresses[toAddress]; exists {
+							i-- // Try again if the address is already used
+							continue
+						}
+						newOut := types.TxOut{
+							Denomination: 4,
+							Address:      toAddress[:],
+						}
+						outs = append(outs, newOut)
+						totalOutputQits += types.Denominations[4].Uint64()
+						addresses[toAddress] = true
+					}
+
+					toAddress := getRandomAddress(addressMap, false, false)
+					if _, exists := addresses[toAddress]; exists {
+						toAddress = getRandomAddress(addressMap, false, false) // Try again if the address is already used
+					}
+					outs = append(outs, types.TxOut{
+						Denomination: 3,
+						Address:      toAddress[:],
+					})
+					totalOutputQits += types.Denominations[3].Uint64()
+					addresses[toAddress] = true
+
+				} else {*/
+				// Choose the same denomination as output
 				conversion := false
 				if transactor.config.ConvertFreq > 0 && numTxsSent%(int(1/transactor.config.ConvertFreq)) == 0 && i == 0 {
 					conversion = true
 					numConverts++
 				}
-				toAddress := getRandomAddress(addressMap, etx, conversion)
-				if !toAddress.Location().Equal(location) {
-					numEtxs++
-				}
+				toAddress := getRandomAddress(addressMap, false, conversion)
 				if _, exists := addresses[toAddress]; exists {
-					i-- // Try again if the address is already used
-					continue
+					toAddress = getRandomAddress(addressMap, false, conversion) // Try again if the address is already used
 				}
-
-				newOut := types.TxOut{
-					Denomination: uint8(denomIndex),
+				outs = append(outs, types.TxOut{
+					Denomination: selectedOutpoint.txOut.Denomination,
 					Address:      toAddress[:],
-				}
-				outs = append(outs, newOut)
+				})
+				totalOutputQits += types.Denominations[selectedOutpoint.txOut.Denomination].Uint64()
+				addresses[toAddress] = true
 
-				// Track the balance of added outpoints
-				if !etx && !conversion {
-					addressMap[toAddress].Balance.Add(addressMap[toAddress].Balance, types.Denominations[uint8(denomIndex)])
+				// Add a single low denomination outpoint to the transaction for fee
+				for lowDenomAddr, outpoints := range lowDenomOutpoints {
+					if len(outpoints) == 0 || addressMap[lowDenomAddr].PrivateKey == nil || addresses[lowDenomAddr] == true {
+						continue // Skip if no outpoints or no private key
+					}
+					lowDenomOutPoint := outpoints[0]
+					inputs = append(inputs, types.TxIn{
+						PreviousOutPoint: *types.NewOutPoint(&lowDenomOutPoint.outpoint.TxHash, lowDenomOutPoint.outpoint.Index),
+						PubKey:           addressMap[lowDenomAddr].PrivateKey.PubKey().SerializeUncompressed(),
+					})
+					totalInputQits += types.Denominations[lowDenomOutPoint.txOut.Denomination].Uint64()
+					inputsMap[uint(lowDenomOutPoint.txOut.Denomination)]++
+					privKeys = append(privKeys, addressMap[lowDenomAddr].PrivateKey)
+					pubKeys = append(pubKeys, addressMap[lowDenomAddr].PrivateKey.PubKey())
+					addresses[lowDenomAddr] = true
+					lowDenomOutpoints[lowDenomAddr] = lowDenomOutpoints[lowDenomAddr][1:] // Remove the first outpoint used
+
+					if totalOutputQits > totalInputQits {
+						fmt.Printf("Error: Total output qits exceeds input qits: %d > %d\n", totalOutputQits, totalInputQits)
+						continue
+					}
+					fee.SetUint64(totalInputQits - totalOutputQits)
+					gas := transactor.GetGasForTx(inputs, outs, transactor.qiScalingFactor, transactor.location)
+					expectedFeeInQuai := tempBigIntFee2.Mul(tempBigIntFee3.SetUint64(gas), transactor.baseFee)
+					expectedFeeInQits := misc.QuaiToQi(transactor.latestBlock, expectedFeeInQuai)
+					expectedFeeInQits.Add(expectedFeeInQits, tempBigIntFee4.Div(expectedFeeInQits, big10)) // Add 10% to the expected fee
+					if fee.Cmp(expectedFeeInQits) < 0 {
+						fmt.Printf("Error: Fee is too low: %d < %d\n", fee.Uint64(), expectedFeeInQits.Uint64())
+						continue
+					}
+					foundFeeInput = true
 				}
-				addresses[toAddress] = true
+			} else if totalLowDenomOuts < 10000 && (selectedOutpoint.txOut.Denomination == 15 || selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 9) {
+				if selectedOutpoint.txOut.Denomination == 15 {
+					for i := 0; i < 99; i++ {
+						toAddress := getRandomAddress(addressMap, false, false)
+						if _, exists := addresses[toAddress]; exists {
+							i-- // Try again if the address is already used
+							continue
+						}
+						newOut := types.TxOut{
+							Denomination: 13,
+							Address:      toAddress[:],
+						}
+						outs = append(outs, newOut)
+						totalOutputQits += types.Denominations[13].Uint64()
+						addresses[toAddress] = true
+					}
+				}
+				if selectedOutpoint.txOut.Denomination == 15 || selectedOutpoint.txOut.Denomination == 13 {
+					for i := 0; i < 99; i++ {
+						toAddress := getRandomAddress(addressMap, false, false)
+						if _, exists := addresses[toAddress]; exists {
+							i-- // Try again if the address is already used
+							continue
+						}
+						newOut := types.TxOut{
+							Denomination: 9,
+							Address:      toAddress[:],
+						}
+						outs = append(outs, newOut)
+						totalOutputQits += types.Denominations[9].Uint64()
+						addresses[toAddress] = true
+					}
+				}
+				if selectedOutpoint.txOut.Denomination == 15 || selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 9 {
+					// Add a 5 Qi output
+					for i := 0; i < 1; i++ {
+						toAddress := getRandomAddress(addressMap, false, false)
+						if _, exists := addresses[toAddress]; exists {
+							i-- // Try again if the address is already used
+							continue
+						}
+						newOut := types.TxOut{
+							Denomination: 8,
+							Address:      toAddress[:],
+						}
+						outs = append(outs, newOut)
+						totalOutputQits += types.Denominations[8].Uint64()
+						addresses[toAddress] = true
+					}
+					// Add 3 1 Qi outputs
+					for i := 0; i < 3; i++ {
+						toAddress := getRandomAddress(addressMap, false, false)
+						if _, exists := addresses[toAddress]; exists {
+							i-- // Try again if the address is already used
+							continue
+						}
+						newOut := types.TxOut{
+							Denomination: 7,
+							Address:      toAddress[:],
+						}
+						outs = append(outs, newOut)
+						totalOutputQits += types.Denominations[7].Uint64()
+						addresses[toAddress] = true
+					}
+
+					for i := 0; i < 195; i++ {
+						toAddress := getRandomAddress(addressMap, false, false)
+						if _, exists := addresses[toAddress]; exists {
+							i-- // Try again if the address is already used
+							continue
+						}
+						newOut := types.TxOut{
+							Denomination: MIN_DENOMINATION,
+							Address:      toAddress[:],
+						}
+						outs = append(outs, newOut)
+						totalOutputQits += types.Denominations[MIN_DENOMINATION].Uint64()
+						addresses[toAddress] = true
+					}
+				}
+				fee.SetUint64(totalInputQits - totalOutputQits)
+				gas := transactor.GetGasForTx(inputs, outs, transactor.qiScalingFactor, transactor.location)
+				expectedFeeInQuai := tempBigIntFee2.Mul(tempBigIntFee3.SetUint64(gas), transactor.baseFee)
+				expectedFeeInQits := misc.QuaiToQi(transactor.latestBlock, expectedFeeInQuai)
+				expectedFeeInQits.Add(expectedFeeInQits, tempBigIntFee4.Div(expectedFeeInQits, big10)) // Add 10% to the expected fee
+				for fee.Cmp(expectedFeeInQits) < 0 {
+					//fmt.Printf("Error: Fee is too low in fee maker: %d < %d\n", fee.Uint64(), expectedFeeInQits.Uint64())
+					outToRemove := outs[len(outs)-1]
+					outs = outs[:len(outs)-1] // Remove the last output
+					fee.Add(fee, types.Denominations[outToRemove.Denomination])
+					gas = transactor.GetGasForTx(inputs, outs, transactor.qiScalingFactor, transactor.location)
+					expectedFeeInQuai = tempBigIntFee2.Mul(tempBigIntFee3.SetUint64(gas), transactor.baseFee)
+					expectedFeeInQits = misc.QuaiToQi(transactor.latestBlock, expectedFeeInQuai)
+					expectedFeeInQits.Add(expectedFeeInQits, tempBigIntFee4.Div(expectedFeeInQits, big10)) // Add 10% to the expected fee
+				}
+				foundFeeInput = true
 			}
-			if numOuts == int(maxOutputs-1) && !foundFeeInput {
-				// Add a low denomination output
-				toAddress := getRandomAddress(addressMap, false, false)
-				if _, exists := addresses[toAddress]; exists {
-					toAddress = getRandomAddress(addressMap, false, false) // Try again if the address is already used
+
+			if !foundFeeInput {
+				fmt.Printf("Error: No fee input found\n")
+				maxOutputs := new(big.Int).Div(types.Denominations[selectedOutpoint.txOut.Denomination], types.Denominations[selectedOutpoint.txOut.Denomination-1]).Uint64()
+				numOuts := int(maxOutputs - 1)
+				denomIndex := selectedOutpoint.txOut.Denomination - 1
+				if selectedOutpoint.txOut.Denomination == 0 {
+					denomIndex = 0
 				}
-				newOut := types.TxOut{
-					Denomination: MIN_DENOMINATION,
-					Address:      toAddress[:],
+				for i := 0; i < numOuts; i++ {
+					etx := false
+					if transactor.config.EtxFreq > 0 && numTxsSent%(int(1/transactor.config.EtxFreq)) == 0 && i == 0 {
+						etx = true
+					}
+					conversion := false
+					if transactor.config.ConvertFreq > 0 && numTxsSent%(int(1/transactor.config.ConvertFreq)) == 0 && i == 0 {
+						conversion = true
+						numConverts++
+					}
+					toAddress := getRandomAddress(addressMap, etx, conversion)
+					if !toAddress.Location().Equal(location) {
+						numEtxs++
+					}
+					if _, exists := addresses[toAddress]; exists {
+						i-- // Try again if the address is already used
+						continue
+					}
+
+					newOut := types.TxOut{
+						Denomination: uint8(denomIndex),
+						Address:      toAddress[:],
+					}
+					outs = append(outs, newOut)
+					totalOutputQits += types.Denominations[uint8(denomIndex)].Uint64()
+					addresses[toAddress] = true
 				}
-				outs = append(outs, newOut)
-				addressMap[toAddress].Balance.Add(addressMap[toAddress].Balance, types.Denominations[MIN_DENOMINATION])
-				addresses[toAddress] = true
 			}
-			//fmt.Println("Creating transaction for address: ", address, " with ", len(outs), " outputs")
+
+			fmt.Printf("Creating transaction for address: %s inputs: %d outputs: %d fee: %d\n", address, len(inputs), len(outs), fee.Uint64())
+			outputsMap := make(map[uint]uint64)
+			for _, output := range outs {
+				outputsMap[uint(output.Denomination)]++
+			}
+			if err := core.CheckDenominations(inputsMap, outputsMap); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				continue
+			}
 
 			if err := transactor.makeUTXOTransaction(inputs, outs, privKeys, pubKeys); err != nil {
-				if !strings.Contains(err.Error(), "txpool is full") { // Transaction is still valid if the txpool is full
+				if strings.Contains(err.Error(), "spends non-existent UTXO") { // Transaction is only invalid in this case
 					spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
 					totalNumOuts--
 				}
 			} else {
-				spendableOutpoints[address] = spendableOutpoints[address][1:] // Remove the first outpoint used
+				spendableOutpoints[address] = spendableOutpoints[address][1:] // No error, remove the first outpoint used
 				totalNumOuts--
 			}
 			txMutex.Unlock()
@@ -1073,4 +1270,9 @@ func Contains(outpoints *[]OutpointAndTxOut, outpoint OutpointAndTxOut) bool {
 
 func IntrinsicFee(txIns, txOuts uint64) *big.Int {
 	return new(big.Int).Mul(big.NewInt(params.GWei), new(big.Int).SetUint64(uint64(txIns*params.SloadGas+txOuts*params.CallValueTransferGas+params.EcrecoverGas)))
+}
+
+func (transactor *Transactor) GetGasForTx(ins []types.TxIn, outs []types.TxOut, qiScalingFactor float64, location common.Location) uint64 {
+	tx := types.NewTx(&types.QiTx{TxIn: ins, TxOut: outs})
+	return types.CalculateQiTxGas(tx, transactor.qiScalingFactor, transactor.location)
 }

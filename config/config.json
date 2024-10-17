@@ -5,14 +5,14 @@
 "numSlices": 9,
 "txs": {
     "tps": {
-      "bloomTps": 100,
-      "target": 1000,
+      "bloomTps": 1,
+      "target": 1,
       "increment": {
         "enabled": false
       }
     },
-    "etxFreq": 0,
-    "convertFreq": 0.1,
+    "etxFreq": 0.01,
+    "convertFreq": 0.01,
     "maxOutputsFreq": 0.1
   },
 "memPool": {

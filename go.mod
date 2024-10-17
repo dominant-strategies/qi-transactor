@@ -1,8 +1,6 @@
 module github.com/dominant-strategies/qi-transactor
 
-go 1.21.1
-
-toolchain go1.21.6
+go 1.23.1
 
 replace github.com/dominant-strategies/go-quai => ../go-quai
 
