@@ -278,6 +278,7 @@ func main() {
 		client:    wsClient,
 		config:    cfg,
 		TargetTPS: cfg.BloomTps,
+		location:  location,
 	}
 	startTime = time.Now()
 	// Load addresses and private keys from JSON file
@@ -577,7 +578,8 @@ func (transactor *Transactor) getBlockAndTransactions(hash common.Hash) {
 	if block.BaseFee().Sign() > 0 {
 		transactor.baseFee = block.BaseFee()
 	} else {
-		transactor.baseFee = misc.QiToQuai(block, params.MinBaseFeeInQits)
+		min := misc.QiToQuai(block, params.MinBaseFeeInQits)
+		transactor.baseFee = min.Div(min, big.NewInt(21000))
 	}
 	// Display block information
 	fmt.Printf("number: %d txs: %d hash: %s gasUsed: %d basefee: %d basefee qits: %d\n", block.WorkObjectHeader().NumberU64(), len(block.QiTransactions()), block.Hash().Hex(), block.GasUsed(), block.BaseFee(), misc.QuaiToQi(block, block.BaseFee()))
@@ -781,7 +783,7 @@ func (transactor *Transactor) createTransactions() {
 			foundFeeInput := false
 			inputsMap := make(map[uint]uint64)
 			inputsMap[uint(selectedOutpoint.txOut.Denomination)]++
-			if totalLowDenomOuts >= 1000 || !(selectedOutpoint.txOut.Denomination == 15 || selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 9) {
+			if totalLowDenomOuts >= 10000 || !(selectedOutpoint.txOut.Denomination == 15 || selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 9) {
 				// 11 : 3x10 1x9
 				// 5: 2x4 1x3
 				/*if selectedOutpoint.txOut.Denomination == 11 {
@@ -885,6 +887,7 @@ func (transactor *Transactor) createTransactions() {
 						continue
 					}
 					foundFeeInput = true
+					break
 				}
 			} else if totalLowDenomOuts < 10000 && (selectedOutpoint.txOut.Denomination == 15 || selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 9) {
 				if selectedOutpoint.txOut.Denomination == 15 {
@@ -985,9 +988,11 @@ func (transactor *Transactor) createTransactions() {
 			}
 
 			if !foundFeeInput {
-				fmt.Printf("Error: No fee input found\n")
+				fmt.Printf("Error: No fee inputs found, reverting to original breakdown mechanism\n")
 				maxOutputs := new(big.Int).Div(types.Denominations[selectedOutpoint.txOut.Denomination], types.Denominations[selectedOutpoint.txOut.Denomination-1]).Uint64()
 				numOuts := int(maxOutputs - 1)
+				totalOutputQits = 0
+				outs = make([]types.TxOut, 0)
 				denomIndex := selectedOutpoint.txOut.Denomination - 1
 				if selectedOutpoint.txOut.Denomination == 0 {
 					denomIndex = 0
