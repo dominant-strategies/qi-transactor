@@ -783,7 +783,7 @@ func (transactor *Transactor) createTransactions() {
 			foundFeeInput := false
 			inputsMap := make(map[uint]uint64)
 			inputsMap[uint(selectedOutpoint.txOut.Denomination)]++
-			if totalLowDenomOuts >= 10000 || !(selectedOutpoint.txOut.Denomination == 15 || selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 9) {
+			if totalLowDenomOuts >= 10000 || !(selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 11 || selectedOutpoint.txOut.Denomination == 8) {
 				// 11 : 3x10 1x9
 				// 5: 2x4 1x3
 				/*if selectedOutpoint.txOut.Denomination == 11 {
@@ -889,8 +889,8 @@ func (transactor *Transactor) createTransactions() {
 					foundFeeInput = true
 					break
 				}
-			} else if totalLowDenomOuts < 10000 && (selectedOutpoint.txOut.Denomination == 15 || selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 9) {
-				if selectedOutpoint.txOut.Denomination == 15 {
+			} else if totalLowDenomOuts < 10000 && (selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 11 || selectedOutpoint.txOut.Denomination == 8) {
+				if selectedOutpoint.txOut.Denomination == 13 {
 					for i := 0; i < 99; i++ {
 						toAddress := getRandomAddress(addressMap, false, false)
 						if _, exists := addresses[toAddress]; exists {
@@ -898,33 +898,16 @@ func (transactor *Transactor) createTransactions() {
 							continue
 						}
 						newOut := types.TxOut{
-							Denomination: 13,
+							Denomination: 11,
 							Address:      toAddress[:],
 						}
 						outs = append(outs, newOut)
-						totalOutputQits += types.Denominations[13].Uint64()
+						totalOutputQits += types.Denominations[11].Uint64()
 						addresses[toAddress] = true
 					}
 				}
-				if selectedOutpoint.txOut.Denomination == 15 || selectedOutpoint.txOut.Denomination == 13 {
+				if selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 11 {
 					for i := 0; i < 99; i++ {
-						toAddress := getRandomAddress(addressMap, false, false)
-						if _, exists := addresses[toAddress]; exists {
-							i-- // Try again if the address is already used
-							continue
-						}
-						newOut := types.TxOut{
-							Denomination: 9,
-							Address:      toAddress[:],
-						}
-						outs = append(outs, newOut)
-						totalOutputQits += types.Denominations[9].Uint64()
-						addresses[toAddress] = true
-					}
-				}
-				if selectedOutpoint.txOut.Denomination == 15 || selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 9 {
-					// Add a 5 Qi output
-					for i := 0; i < 1; i++ {
 						toAddress := getRandomAddress(addressMap, false, false)
 						if _, exists := addresses[toAddress]; exists {
 							i-- // Try again if the address is already used
@@ -938,8 +921,10 @@ func (transactor *Transactor) createTransactions() {
 						totalOutputQits += types.Denominations[8].Uint64()
 						addresses[toAddress] = true
 					}
-					// Add 3 1 Qi outputs
-					for i := 0; i < 3; i++ {
+				}
+				if selectedOutpoint.txOut.Denomination == 13 || selectedOutpoint.txOut.Denomination == 11 || selectedOutpoint.txOut.Denomination == 8 {
+					// Add a 5 Qi output
+					for i := 0; i < 1; i++ {
 						toAddress := getRandomAddress(addressMap, false, false)
 						if _, exists := addresses[toAddress]; exists {
 							i-- // Try again if the address is already used
@@ -951,6 +936,21 @@ func (transactor *Transactor) createTransactions() {
 						}
 						outs = append(outs, newOut)
 						totalOutputQits += types.Denominations[7].Uint64()
+						addresses[toAddress] = true
+					}
+					// Add 3 1 Qi outputs
+					for i := 0; i < 3; i++ {
+						toAddress := getRandomAddress(addressMap, false, false)
+						if _, exists := addresses[toAddress]; exists {
+							i-- // Try again if the address is already used
+							continue
+						}
+						newOut := types.TxOut{
+							Denomination: 6,
+							Address:      toAddress[:],
+						}
+						outs = append(outs, newOut)
+						totalOutputQits += types.Denominations[6].Uint64()
 						addresses[toAddress] = true
 					}
 
